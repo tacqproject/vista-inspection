@@ -1,0 +1,43 @@
+version: '3.9'
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - uploads_data:/app/uploads
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:///./vista.db
+      - UPLOAD_DIR=/app/uploads
+      - ODM_URL=http://odm:3000
+      - CORS_ORIGINS=http://localhost:5173
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      target: dev
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # Volitelné: OpenDroneMap pro fotogrammetrii
+  # odm:
+  #   image: opendronemap/nodeodm
+  #   ports:
+  #     - "3000:3000"
+  #   volumes:
+  #     - odm_data:/var/www/data
+
+volumes:
+  uploads_data:
+  # odm_data:

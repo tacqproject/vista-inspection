@@ -1,0 +1,71 @@
+# Local configuration; only templates belong in Git.
+.env
+.env.*
+!.env.example
+
+# Installed dependencies, build output and caches.
+.venv/
+venv/
+node_modules/
+dist/
+build/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.tsbuildinfo
+.coverage
+htmlcov/
+
+# Inspection data, database and logs.
+uploads/
+/_deck_img/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.log
+
+# External source checkout (version documented in README).
+/ai/dacl10k_challenge/
+
+# Model weights and downloaded datasets.
+weights/
+checkpoints/
+datasets/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+
+# Photos, reconstructed models, reports and archives.
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+*.heic
+*.exr
+*.mp4
+*.mov
+*.glb
+*.gltf
+*.ply
+*.obj
+*.stl
+*.las
+*.laz
+*.docx
+*.pdf
+*.zip
+*.7z
+*.tar
+*.gz
+
+# Local editor and operating-system files.
+.DS_Store
+.idea/
+.vscode/
