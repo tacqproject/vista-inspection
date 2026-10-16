@@ -47,6 +47,18 @@ def texture_fidelity(photo: np.ndarray, textured: np.ndarray) -> dict:
 def render_panels(mesh_path: Path, cameras_sfm: Path, photo_name: str,
                   photos_dir: Path | None = None, width: int = 1200):
     """(undistorted photo | None, textured render, shaded geometry render) as RGB arrays."""
+    # The isolated API container has no display/GPU device. Configure Mesa
+    # before importing Open3D; reconstruction GPU workers are separate.
+    # https://www.open3d.org/docs/release/tutorial/visualization/cpu_rendering.html
+    if sys.platform.startswith('linux'):
+        import os
+        import tempfile
+        os.environ.setdefault('EGL_PLATFORM', 'surfaceless')
+        os.environ.setdefault('LIBGL_ALWAYS_SOFTWARE', 'true')
+        if not os.environ.get('XDG_RUNTIME_DIR'):
+            runtime = Path(tempfile.gettempdir()) / f'vista-raw-render-{os.getuid()}'
+            runtime.mkdir(mode=0o700, exist_ok=True)
+            os.environ['XDG_RUNTIME_DIR'] = str(runtime)
     import cv2
     import open3d as o3d
     from open3d.visualization import rendering

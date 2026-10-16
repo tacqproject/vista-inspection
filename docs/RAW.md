@@ -138,6 +138,17 @@ vstupy byly originály DNG. Pro OpenMVS vzniklo 20 PNG v plném rozlišení.
 Při výpočtu hloubkových map byl zaznamenán proces `DensifyPointCloud` na GPU
 s vytížením až 100 %.
 
+Rekonstrukce testovací sady v režimu Maximální přesnost byla dokončena včetně
+textur, tří LOD úrovní a 41 streamovaných dlaždic. Test využil obnovení od
+texturování po opravě výše popsaného pádu OBJ; SfM ani hustá rekonstrukce se
+neopakovaly. Výsledný model a pozice kamer se otevřely v prohlížeči bez chyb
+JavaScriptu a HTTP. Celá sada 798 DNG zůstává ve stavu připraveno.
+
+Report kvality vytváří náhledy přes Mesa na CPU v režimu bez displeje
+(`EGL_PLATFORM=surfaceless`), aby nepotřeboval GPU uvnitř API kontejneru;
+viz [dokumentace Open3D](https://www.open3d.org/docs/release/tutorial/visualization/cpu_rendering.html).
+Byl ověřen report se třemi pohledy porovnanými se zdrojovými DNG.
+
 Výsledky praktického ověření, checksumy původní instalace a manifest importu
 jsou v soukromém `operations/`. Fotografie, modely, náhledy, databáze a logy
 se do repozitáře neukládají.
