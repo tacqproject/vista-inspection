@@ -450,6 +450,12 @@ export default function InspectionDetail() {
         </div>
       )}
 
+      {photoSet?.status === 'pending' && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-sm text-amber-900">
+          {photoSet.photo_count} snímků připraveno. Rekonstrukci spusťte tlačítkem Model.
+          DNG originály se použijí přímo pro SfM; galerie zobrazuje náhledy.
+        </div>
+      )}
       {/* Processing banner */}
       {photoSet && ['processing', 'uploading'].includes(photoSet.status) && (
         <div className="bg-blue-50 border-b border-blue-200 px-4 py-2 flex items-center gap-3 text-sm">
@@ -971,8 +977,8 @@ function ReprocessModal({ inspectionId, onClose, onStarted }: {
   const [refineMesh, setRefineMesh] = useState(true)
   const [webPostprocess, setWebPostprocess] = useState(true)
   const [aiNormals, setAiNormals] = useState(true)
-  const [aiDefects, setAiDefects] = useState(true)
-  const [photoPrep, setPhotoPrep] = useState(true)
+  const [aiDefects, setAiDefects] = useState(false)
+  const [photoPrep, setPhotoPrep] = useState(false)
   const [pipeline, setPipeline] = useState('')   // '' = built-in default
   const [busy, setBusy] = useState(false)
   const mgRef = useRef<HTMLInputElement>(null)
@@ -1077,7 +1083,7 @@ function ReprocessModal({ inspectionId, onClose, onStarted }: {
         <label className="flex items-start gap-2 text-xs text-gray-700 mb-2 cursor-pointer">
           <input type="checkbox" className="mt-0.5" checked={photoPrep} onChange={e => setPhotoPrep(e.target.checked)} />
           <span>Příprava fotek — vyrovná expozici podle metadat, zesvětlí stíny (ostré slunce) a vyřadí rozmazané
-            a téměř stejné záběry; originály zůstanou beze změny</span>
+            a téměř stejné záběry. U DNG se tento krok přeskočí a SfM používá původní RAW.</span>
         </label>
 
         <label className="flex items-start gap-2 text-xs text-gray-700 mb-2 cursor-pointer">

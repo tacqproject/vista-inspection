@@ -605,7 +605,7 @@ export default function Viewer3D({ inspectionId, modelPath, scaleFactor = 1, map
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div className="text-center text-slate-400">
             <p className="text-sm">Žádný 3D model</p>
-            <p className="text-xs mt-1 text-slate-500">Nahrajte snímky pro rekonstrukci</p>
+            <p className="text-xs mt-1 text-slate-500">Snímky najdete na kartě Foto. Rekonstrukci spusťte přes Model.</p>
           </div>
         </div>
       )}

@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+"""Small Docker CLI client for the restricted RAW job broker (no Docker socket)."""
+import base64
+import json
+import os
+import socket
+import sys
+
+with socket.socket(socket.AF_UNIX) as sock:
+    sock.connect(os.environ['VISTA_JOB_SOCKET'])
+    sock.sendall(json.dumps(sys.argv[1:]).encode() + b'\n')
+    with sock.makefile('rb') as stream:
+        for line in stream:
+            frame = json.loads(line)
+            if 'data' in frame:
+                sys.stdout.buffer.write(base64.b64decode(frame['data']))
+                sys.stdout.buffer.flush()
+            if 'exit' in frame:
+                raise SystemExit(frame['exit'])
+raise SystemExit('RAW job broker disconnected')

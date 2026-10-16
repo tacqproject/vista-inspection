@@ -1,7 +1,7 @@
 @echo off
-cd backend
+cd /d "%~dp0backend"
 if not exist .venv (
     python -m venv .venv
     .venv\Scripts\pip install -r requirements.txt
 )
-.venv\Scripts\uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+.venv\Scripts\uvicorn app.main:app --reload --host 0.0.0.0 --port 8001

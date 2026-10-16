@@ -1,17 +1,18 @@
 # VISTA – rychlý start pro vývoj (bez Dockeru)
-# Spustí backend a frontend paralelně
+# Spustí samostatný RAW backend a frontend paralelně
+$rawRepoRoot = $PSScriptRoot
 
-Write-Host "===  VISTA – Inspekce konstrukcí  ===" -ForegroundColor Cyan
+Write-Host "===  VISTA RAW – Inspekce konstrukcí  ===" -ForegroundColor Cyan
 
 # Backend
 Write-Host "`n>> Spouštím backend (FastAPI)..." -ForegroundColor Yellow
 $backendJob = Start-Job -ScriptBlock {
-    Set-Location "$using:PWD\backend"
+    Set-Location "$using:rawRepoRoot\backend"
     if (-not (Test-Path ".venv")) {
         python -m venv .venv
         .venv\Scripts\pip install -r requirements.txt --quiet
     }
-    .venv\Scripts\uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+    .venv\Scripts\uvicorn app.main:app --reload --host 0.0.0.0 --port 8001
 }
 
 Start-Sleep -Seconds 3
@@ -19,16 +20,16 @@ Start-Sleep -Seconds 3
 # Frontend
 Write-Host ">> Spouštím frontend (Vite)..." -ForegroundColor Yellow
 $frontendJob = Start-Job -ScriptBlock {
-    Set-Location "$using:PWD\frontend"
+    Set-Location "$using:rawRepoRoot\frontend"
     if (-not (Test-Path "node_modules")) {
         npm install --silent
     }
     npm run dev
 }
 
-Write-Host "`n  Backend:  http://localhost:8000" -ForegroundColor Green
-Write-Host "  Frontend: http://localhost:5173" -ForegroundColor Green
-Write-Host "  API docs: http://localhost:8000/docs" -ForegroundColor Green
+Write-Host "`n  Backend:  http://localhost:8001" -ForegroundColor Green
+Write-Host "  Frontend: http://localhost:5174" -ForegroundColor Green
+Write-Host "  API docs: http://localhost:8001/docs" -ForegroundColor Green
 Write-Host "`nCtrl+C pro ukončení`n"
 
 try {

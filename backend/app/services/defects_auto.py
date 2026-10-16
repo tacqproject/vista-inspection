@@ -78,7 +78,8 @@ def _set_status(inspection_id: str, **kw):
 def detect(inspection_id: str, masks_dir: Path | None = None) -> Path:
     """Run the detector over all photos (blocking; call in a thread)."""
     from app.services.photogrammetry.openmvs_bridge import gpu_lock
-    photos = storage.get_photos_dir(inspection_id).resolve()
+    from app.services.raw_images import ai_inputs
+    photos, raw_names = ai_inputs(inspection_id)
     out = out_dir(inspection_id).resolve()
     out.mkdir(parents=True, exist_ok=True)
     _set_status(inspection_id, status="detecting", progress=0)
@@ -106,6 +107,11 @@ def detect(inspection_id: str, masks_dir: Path | None = None) -> Path:
         _set_status(inspection_id, status="failed", error=f"detektor skončil s kódem {rc} (viz detect.log)")
         raise RuntimeError(f"Detekce poruch selhala (kód {rc})")
     verify(inspection_id)
+    if raw_names:
+        data = json.loads((out / "detections.json").read_text())
+        for image in data.get("images", []):
+            image["filename"] = raw_names.get(image["filename"], image["filename"])
+        (out / "detections.json").write_text(json.dumps(data, ensure_ascii=False))
     _set_status(inspection_id, status="detected", progress=100)
     return out / "detections.json"
 
@@ -127,7 +133,8 @@ def verify(inspection_id: str) -> bool:
     if not (det.exists() and model.exists() and cmd):
         return False
     py = shlex.split(cmd)[0]
-    photos = storage.get_photos_dir(inspection_id).resolve()
+    from app.services.raw_images import ai_inputs
+    photos, raw_names = ai_inputs(inspection_id)
     _set_status(inspection_id, status="detecting", progress=0, stage="ověření detekcí")
     with open(out_dir(inspection_id) / "verify.log", "w") as log, gpu_lock():
         rc = subprocess.run([py, str(VERIFIER / "verify_detections.py"), str(det), str(photos), str(model)],
@@ -165,7 +172,7 @@ def detect_if_needed(inspection_id: str) -> Path | None:
     f = out_dir(inspection_id) / "detections.json"
     try:
         n_photos = sum(1 for p in storage.get_photos_dir(inspection_id).iterdir()
-                       if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".tif", ".tiff"))
+                       if p.suffix.lower() in storage.ALLOWED_IMAGE_EXTENSIONS)
         if f.exists() and len(json.loads(f.read_text())["images"]) >= n_photos:
             _set_status(inspection_id, status="detected", progress=100)
             return f
@@ -394,7 +401,8 @@ def _surroundings(photo: Path, poly: np.ndarray) -> tuple[float, float]:
     if key not in _IMG_CACHE:
         if len(_IMG_CACHE) > 4:
             _IMG_CACHE.clear()
-        img = cv2.imread(key, cv2.IMREAD_REDUCED_COLOR_4)
+        from app.services.raw_images import read_bgr
+        img = read_bgr(key, cv2.IMREAD_REDUCED_COLOR_4)
         _IMG_CACHE[key] = None if img is None else (
             cv2.cvtColor(img, cv2.COLOR_BGR2HSV),
             np.abs(cv2.Laplacian(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32), cv2.CV_32F)))
@@ -584,7 +592,8 @@ def build_defects(inspection_id: str, m_per_scene: float | None, require_mesh: b
                 if d["cls"] == "crack" and len(skel) >= 3:
                     if gray_name != im["filename"]:
                         gray_name = im["filename"]
-                        gray = cv2.imread(str(photos_dir / gray_name), cv2.IMREAD_GRAYSCALE)
+                        from app.services.raw_images import read_bgr
+                        gray = read_bgr(photos_dir / gray_name, cv2.IMREAD_GRAYSCALE)
                     if gray is not None:
                         cw = _crack_width_px(gray, skel)
                 gsd = dmed / cam.fx                     # mesh units per pixel at the defect

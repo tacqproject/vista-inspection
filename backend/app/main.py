@@ -98,8 +98,8 @@ async def seed_admin():
             ))
             await db.commit()
             log.warning(
-                "Vytvořen výchozí účet '%s' s heslem '%s' — po prvním přihlášení jej změňte!",
-                settings.default_admin_username, settings.default_admin_password,
+                "Vytvořen výchozí účet '%s' — změňte počáteční heslo.",
+                settings.default_admin_username,
             )
     if settings.jwt_secret == "vista-dev-insecure-change-me":
         log.warning("JWT_SECRET není nastaven — používá se nezabezpečený vývojový klíč. "
@@ -117,7 +117,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="VISTA – Inspekce a katalogizace konstrukcí",
+    title="VISTA RAW – samostatná instance",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -206,6 +206,24 @@ app.include_router(config.router, prefix="/api")
 app.include_router(ai.router, prefix="/api")
 app.include_router(ai.defects_router, prefix="/api")
 
+# DNG URLs keep the original filename for camera/annotation identity; browsers
+# receive a separate display derivative. SfM reads the original file on disk.
+@app.get('/uploads/inspections/{inspection_id}/photos/{filename}')
+async def display_source_photo(inspection_id: str, filename: str):
+    import asyncio
+    from fastapi import HTTPException
+    from fastapi.responses import FileResponse
+    from app.services.raw_images import source_photo, display_file, is_raw
+    try:
+        source = source_photo(inspection_id, filename)
+        display = await asyncio.to_thread(display_file, source)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc))
+    except FileNotFoundError:
+        raise HTTPException(404, 'Snímek nenalezen')
+    return FileResponse(display, media_type='image/jpeg' if is_raw(source) else None)
+
+
 # Serve uploaded files
 uploads_dir = settings.upload_path
 uploads_dir.mkdir(parents=True, exist_ok=True)
@@ -224,4 +242,4 @@ async def inspection_ws(inspection_id: str, ws: WebSocket):
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": "1.0.0"}
+    return {"status": "ok", "version": "1.0.0-raw", "instance": "raw", "raw_formats": ["dng"]}

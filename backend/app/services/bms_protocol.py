@@ -278,7 +278,8 @@ def _photo_box(path: Path) -> io.BytesIO | None:
     60-photo protocol stays a few tens of MB."""
     try:
         from PIL import Image, ImageOps
-        im = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+        from app.services.raw_images import display_file
+        im = ImageOps.exif_transpose(Image.open(display_file(path))).convert("RGB")
     except Exception:
         return None
     W, H = 1600, 1200

@@ -1,14 +1,19 @@
 import zipfile
+import io
 import shutil
+import os
+import tempfile
 from pathlib import Path
 from typing import Optional
 
 from app.config import settings
 
-ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
+ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".dng"}
 
 
 def get_inspection_dir(inspection_id: str) -> Path:
+    if not inspection_id or Path(inspection_id).name != inspection_id or inspection_id in {'.', '..'}:
+        raise ValueError("Invalid inspection id")
     d = settings.upload_path / "inspections" / inspection_id
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -37,27 +42,35 @@ def save_uploaded_photos(inspection_id: str, files: list[tuple[str, bytes]]) -> 
     saved = []
     for filename, content in files:
         dest = photos_dir / Path(filename).name
-        dest.write_bytes(content)
+        if dest.suffix.lower() not in ALLOWED_IMAGE_EXTENSIONS:
+            raise ValueError("Unsupported image format")
+        if shutil.disk_usage(photos_dir).free < settings.disk_reserve_gb * 1e9 + len(content):
+            raise ValueError("Nedostatek volného místa pro nahrání fotografie")
+        # Replace the directory entry, never follow a link to a shared original.
+        fd, name = tempfile.mkstemp(dir=photos_dir)
+        temp = Path(name)
+        try:
+            with os.fdopen(fd, 'wb') as tmp:
+                tmp.write(content)
+            os.replace(temp, dest)
+        finally:
+            temp.unlink(missing_ok=True)
         saved.append(dest)
     return saved
 
 
 def extract_zip(inspection_id: str, zip_bytes: bytes) -> list[Path]:
     photos_dir = get_photos_dir(inspection_id)
-    tmp_zip = get_inspection_dir(inspection_id) / "upload.zip"
-    tmp_zip.write_bytes(zip_bytes)
-
     extracted = []
-    with zipfile.ZipFile(tmp_zip, "r") as zf:
-        for member in zf.namelist():
-            ext = Path(member).suffix.lower()
-            if ext in ALLOWED_IMAGE_EXTENSIONS:
-                target = photos_dir / Path(member).name
-                with zf.open(member) as src, open(target, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-                extracted.append(target)
-
-    tmp_zip.unlink(missing_ok=True)
+    # The request already holds the archive: do not consume SSD reserve with
+    # a second copy. Check uncompressed size before allocating/extracting it.
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zf:
+        for member in zf.infolist():
+            if member.is_dir() or Path(member.filename).suffix.lower() not in ALLOWED_IMAGE_EXTENSIONS:
+                continue
+            if shutil.disk_usage(photos_dir).free < settings.disk_reserve_gb * 1e9 + member.file_size:
+                raise ValueError("Nedostatek volného místa pro rozbalení fotografie")
+            extracted.extend(save_uploaded_photos(inspection_id, [(Path(member.filename).name, zf.read(member))]))
     return extracted
 
 
@@ -69,6 +82,10 @@ def count_photos(inspection_id: str) -> int:
 
 
 def get_relative_path(abs_path: Path) -> str:
+    try:
+        return str(Path(abs_path).absolute().relative_to(settings.upload_path.absolute()))
+    except ValueError:
+        pass
     # Resolve both sides so absolute and relative inputs relativize consistently
     root = settings.upload_path.resolve()
     p = Path(abs_path).resolve()

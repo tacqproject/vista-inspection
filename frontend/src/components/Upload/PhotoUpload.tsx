@@ -74,7 +74,7 @@ function EngineStatusBanner({ status, loading }: { status: EngineStatus | null; 
       ${available ? 'bg-green-50 border-green-200 text-green-800' : 'bg-red-50 border-red-200 text-red-700'}`}>
       <Cpu size={13} className="shrink-0" />
       {available
-        ? <span><b>AliceVision (Meshroom)</b> připraven — rekonstrukce poběží na GPU na pozadí (~1 h dle počtu snímků).</span>
+        ? <span><b>AliceVision (Meshroom)</b> připraven — rekonstrukci můžete spustit po nahrání snímků.</span>
         : <span><b>AliceVision nenalezen.</b> Zkontrolujte MESHROOM_PATH v .env na serveru.</span>}
     </div>
   )
@@ -110,7 +110,7 @@ function PhotosTab({ inspectionId, onClose }: { inspectionId: string; onClose: (
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: {
-      'image/*': ['.jpg', '.jpeg', '.png', '.tif', '.tiff'],
+      'image/*': ['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.dng'],
       'video/*': ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'],
       'application/zip': ['.zip'],
       'application/x-zip-compressed': ['.zip'],
@@ -140,7 +140,7 @@ function PhotosTab({ inspectionId, onClose }: { inspectionId: string; onClose: (
       <div className="text-center py-8">
         <CheckCircle size={48} className="mx-auto text-green-500 mb-3" />
         <p className="font-semibold text-green-700">Snímky nahrány!</p>
-        <p className="text-sm text-gray-500 mt-1">AliceVision rekonstrukce probíhá na pozadí (GPU)…</p>
+        <p className="text-sm text-gray-500 mt-1">Fotografie jsou připravené. Rekonstrukci spusťte v nastavení inspekce.</p>
       </div>
     )
   }
@@ -161,7 +161,7 @@ function PhotosTab({ inspectionId, onClose }: { inspectionId: string; onClose: (
         <p className="text-sm font-medium text-gray-700">
           {isDragActive ? 'Pusťte soubory zde…' : 'Přetáhněte snímky nebo video, nebo klikněte'}
         </p>
-        <p className="text-xs text-gray-400 mt-1">JPG, PNG, TIFF, ZIP archiv nebo video (MP4/MOV…)</p>
+        <p className="text-xs text-gray-400 mt-1">DNG (RAW), JPG, PNG, TIFF, ZIP archiv nebo video (MP4/MOV…)</p>
         <p className="text-[11px] text-gray-400 mt-0.5">Z videa se automaticky vyberou ostré snímky pro rekonstrukci.</p>
       </div>
 

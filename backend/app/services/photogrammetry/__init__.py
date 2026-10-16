@@ -63,7 +63,19 @@ async def run_reconstruction(
         progress=on_progress,
     )
 
-    if ctx.params.get("photo_prep", True):
+    from app.services.raw_images import is_raw
+    from app.services.storage import ALLOWED_IMAGE_EXTENSIONS
+    import json
+    sources = sorted(p for p in ctx.photos_dir.iterdir() if p.suffix.lower() in ALLOWED_IMAGE_EXTENSIONS)
+    has_raw = any(is_raw(p) for p in sources)
+    (ctx.models_dir / 'source_manifest.json').write_text(json.dumps({
+        'input': 'originals' if has_raw else 'photos',
+        'raw': has_raw,
+        'photos': [{'filename': p.name, 'source': str(p.resolve()), 'bytes': p.stat().st_size} for p in sources],
+    }, indent=2))
+    if has_raw:
+        await ctx.report(1, 'RAW: rekonstrukce z původních DNG, bez JPEG předzpracování…')
+    elif ctx.params.get("photo_prep", True):
         await _prepare_photos(ctx)
 
     await spec.run(ctx)

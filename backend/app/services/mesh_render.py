@@ -88,7 +88,8 @@ def render_panels(mesh_path: Path, cameras_sfm: Path, photo_name: str,
 
     photo = None
     if photos_dir:
-        img = cv2.imread(str(Path(photos_dir) / photo_name))
+        from app.services.raw_images import read_bgr
+        img = read_bgr(Path(photos_dir) / photo_name)
         if img is not None:
             Kf = np.array([[cam.fx, 0, cam.width / 2 + cam.ppx], [0, cam.fy, cam.height / 2 + cam.ppy], [0, 0, 1]])
             k1, k2, k3 = cam.dist

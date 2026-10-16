@@ -28,7 +28,6 @@ from app.config import settings
 from ..base import ReconstructionContext, postprocess_step
 
 CONTAINER_CACHE = "/tmp/MeshroomCache"
-EMPTY_COLOR = 0x808080          # texture of surfaces not seen by any photo
 
 
 def uses_openmvs(params: dict) -> bool:
@@ -120,16 +119,17 @@ async def _ai_denoise(ctx: ReconstructionContext, work: Path, mesh: Path, log: P
 # ~26 GB; 728 drone photos at the same level ran a 62 GB machine out of memory
 # three times. Budget the total depth-map pixels and step the resolution level
 # down for big sets — RefineMesh still refines against the full images.
-DENSE_PX_BUDGET = 700e6
+DENSE_PX_BUDGET = 300e6  # isolated workers have a 24 GiB RAM cap
 
 
 def _dense_level(work: Path, n_views: int) -> int:
-    import cv2
+    from PIL import Image
     img = next((p for p in (work / "images").iterdir()), None)
     if img is None or n_views == 0:
         return 1
-    h, w = cv2.imread(str(img), cv2.IMREAD_REDUCED_GRAYSCALE_8).shape
-    px = h * w * 64
+    with Image.open(img) as image:
+        w, h = image.size
+    px = h * w
     level = 1
     while n_views * px / 4 ** level > DENSE_PX_BUDGET and level < 3:
         level += 1
@@ -175,18 +175,16 @@ async def run(ctx: ReconstructionContext) -> None:
         bool(ctx.params.get("keep_largest_mesh", True)),
     )
     (out_dir / "refine_stats.txt").write_text(str(stats))
+    await finish_texturing(ctx, work, out_dir)
 
+
+async def finish_texturing(ctx: ReconstructionContext, work: Path, out_dir: Path) -> None:
+    """Final stage can also resume a saved mesh after an exporter failure."""
+    from app.services.photogrammetry import openmvs_bridge as O
     await ctx.report(92, "OpenMVS: texturování…")
     with open(work / "openmvs.log", "a") as lf:
-        await asyncio.to_thread(O._mvs, work.resolve(), "TextureMesh", "scene_dense.mvs",
-                                "--mesh-file", closed.name, "--export-type", "obj",
-                                # faces no photo sees (e.g. closed holes): neutral grey
-                                # instead of OpenMVS' default bright orange 0xFF7F27
-                                "--empty-color", str(EMPTY_COLOR),
-                                "-o", "textured.obj", log=lf)
-    textured = work / "textured.obj"
-    if not textured.exists():
-        raise RuntimeError("OpenMVS nevytvořil texturovaný model.")
+        textured = await asyncio.to_thread(O.texture_mesh, work.resolve(),
+                                           "scene_dense.mvs", "mesh_closed.ply", lf)
 
     for old in out_dir.glob("texture*"):          # stale textures of a previous run
         old.unlink(missing_ok=True)

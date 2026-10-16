@@ -104,15 +104,19 @@ def export_colmap(sfm_json: Path, out_dir: Path, max_side: int = 0, quality: int
         R = M.T                                  # world → camera
         t = -R @ C
         s = min(1.0, max_side / max(w, h)) if max_side else 1.0
-        name = f"{len(views) + 1:05d}.jpg"
+        from app.services.raw_images import is_raw
+        name = f"{len(views) + 1:05d}" + ('.png' if is_raw(v['path']) else '.jpg')
         views.append({"id": len(views) + 1, "view": v, "K": K, "dist": dist, "R": R, "t": t,
                       "w": w, "h": h, "s": s, "name": name})
     by_view = {vw["view"]["viewId"]: vw for vw in views}
 
     def undistort(vw):
-        img = cv2.imread(vw["view"]["path"], cv2.IMREAD_COLOR)
+        from app.services.raw_images import read_bgr
+        img = read_bgr(vw["view"]["path"])
         if img is None:
             raise FileNotFoundError(vw["view"]["path"])
+        if img.shape[:2] != (vw['h'], vw['w']):
+            raise ValueError(f"Source dimensions {img.shape[:2]} do not match SfM {(vw['h'], vw['w'])}")
         if interp is None:
             und = cv2.undistort(img, vw["K"], vw["dist"], None, vw["K"])
         else:
@@ -122,9 +126,14 @@ def export_colmap(sfm_json: Path, out_dir: Path, max_side: int = 0, quality: int
         if vw["s"] < 1.0:
             und = cv2.resize(und, (round(vw["w"] * vw["s"]), round(vw["h"] * vw["s"])),
                              interpolation=cv2.INTER_AREA)
-        cv2.imwrite(str(img_dir / vw["name"]), und, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        options = [cv2.IMWRITE_PNG_COMPRESSION, 2] if vw['name'].endswith('.png') else [cv2.IMWRITE_JPEG_QUALITY, quality]
+        from app.config import settings
+        if shutil.disk_usage(out_dir).free < settings.disk_reserve_gb * 1e9 + und.nbytes:
+            raise RuntimeError('Nedostatek místa pro rozvinuté RAW snímky; uvolněte místo na SSD.')
+        if not cv2.imwrite(str(img_dir / vw["name"]), und, options):
+            raise RuntimeError(f"Cannot write OpenMVS image {vw['name']}")
 
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=2) as ex:
         list(ex.map(undistort, views))
 
     # landmarks + undistorted observations
@@ -184,6 +193,12 @@ class gpu_lock:
         self.f.close()
 
 
+class OpenMVSError(RuntimeError):
+    def __init__(self, tool: str, code: int):
+        self.code = code
+        super().__init__(f"OpenMVS {tool} selhal (kód {code})")
+
+
 def _mvs(work: Path, *args: str, log) -> None:
     """Run one OpenMVS tool in the container (work dir mounted at the same path)."""
     uid = f"{os.getuid()}:{os.getgid()}"
@@ -197,7 +212,55 @@ def _mvs(work: Path, *args: str, log) -> None:
     else:
         r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT)
     if r.returncode != 0:
-        raise RuntimeError(f"OpenMVS {args[0]} selhal (kód {r.returncode})")
+        raise OpenMVSError(args[0], r.returncode)
+
+
+def _textured_ply_to_obj(ply: Path, obj: Path) -> None:
+    """Preserve geometry and per-corner UVs while avoiding OpenMVS 2.3 SaveOBJ.
+
+    Its single-atlas OBJ exporter can index an empty faceTexindices vector:
+    https://github.com/cdcseacave/openMVS/issues/1132
+    PyMeshLab reads PLY TextureFile/texcoord and exports the same textured mesh.
+    """
+    import pymeshlab
+    ms = pymeshlab.MeshSet()
+    ms.load_new_mesh(str(ply))
+    mesh = ms.current_mesh()
+    if not mesh.has_wedge_tex_coord() or mesh.texture_number() == 0:
+        raise RuntimeError('OpenMVS PLY neobsahuje UV souřadnice nebo textury.')
+    ms.save_current_mesh(str(obj), save_wedge_texcoord=True)
+    # MeshLab writes name.obj.mtl; the rest of VISTA uses name.mtl.
+    material = Path(str(obj) + '.mtl')
+    if not material.exists():
+        raise RuntimeError('Převod texturovaného PLY nevytvořil materiál.')
+    material.replace(obj.with_suffix('.mtl'))
+    temp = obj.with_suffix('.obj.tmp')
+    try:
+        with obj.open() as src, temp.open('w') as dst:
+            for line in src:
+                dst.write(f'mtllib {obj.with_suffix(".mtl").name}\n' if line.startswith('mtllib ') else line)
+        temp.replace(obj)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def texture_mesh(work: Path, scene: str, mesh: str, log) -> Path:
+    """Native OBJ first; retry only the known exporter crash via textured PLY."""
+    options = ('TextureMesh', scene, '--mesh-file', mesh, '--empty-color', str(0x808080))
+    obj = work / 'textured.obj'
+    try:
+        _mvs(work, *options, '--export-type', 'obj', '-o', obj.name, log=log)
+    except OpenMVSError as exc:
+        if exc.code != 139:
+            raise
+        log.write('\nExport OBJ spadl; opakuji texturování do PLY a převádím se zachováním UV.\n')
+        log.flush()
+        ply = work / 'textured.ply'
+        _mvs(work, *options, '--export-type', 'ply', '-o', ply.name, log=log)
+        _textured_ply_to_obj(ply, obj)
+    if not obj.is_file():
+        raise RuntimeError('OpenMVS nevytvořil texturovaný model.')
+    return obj
 
 
 def _densify(work: Path, log, *args: str, attempts: int = 3) -> None:
@@ -217,8 +280,9 @@ def _densify(work: Path, log, *args: str, attempts: int = 3) -> None:
     n = sum(1 for _ in (work / "images").iterdir())
     for f in (work / "images").iterdir():
         try:
-            import cv2
-            h, w = (v * 8 for v in cv2.imread(str(f), cv2.IMREAD_REDUCED_GRAYSCALE_8).shape)
+            from PIL import Image
+            with Image.open(f) as image:
+                w, h = image.size
             break
         except Exception:  # noqa: BLE001
             continue
@@ -226,7 +290,8 @@ def _densify(work: Path, log, *args: str, attempts: int = 3) -> None:
     side = min(max(h, w) / 2 ** level, max_res)
     px = side * side * (min(h, w) / max(h, w)) if h else 0
     need = px * 50 * n
-    free = shutil.disk_usage(work).free - 3e9          # meshing/texturing headroom
+    from app.config import settings
+    free = max(0, shutil.disk_usage(work).free - (settings.disk_reserve_gb + 3) * 1e9)
     if need and free < need:
         side = int(side * (free / need) ** 0.5)
         if side < 1024:
@@ -329,9 +394,7 @@ def run_openmvs(work: Path, resolution_level: int = 1, refine: bool = True,
             mesh = "mesh_refined.ply"
         if not texture:
             return work / mesh
-        _mvs(work, "TextureMesh", scene, "--mesh-file", mesh,
-             "--export-type", "obj", "--empty-color", str(0x808080), "-o", "textured.obj", log=log)
-        return work / "textured.obj"
+        return texture_mesh(work, scene, mesh, log)
 
 
 DSINE_IMAGE = os.environ.get("VISTA_DSINE_IMAGE", "vista-dsine")

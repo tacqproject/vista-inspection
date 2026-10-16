@@ -145,8 +145,13 @@ async def attach_source_photo(
         raise HTTPException(404, "Zdrojový snímek nenalezen")
     img_dir = _detail_dir(inspection_id, annotation_id)
     img_dir.mkdir(parents=True, exist_ok=True)
+    from app.services.raw_images import display_file, is_raw
+    import asyncio
+    if is_raw(src):
+        filename += '.jpg'
+        src = await asyncio.to_thread(display_file, src)
     dest = img_dir / filename
-    dest.write_bytes(src.read_bytes())
+    await asyncio.to_thread(dest.write_bytes, src.read_bytes())
     return {"filename": filename, "total": len(list(img_dir.iterdir()))}
 
 

@@ -19,6 +19,7 @@ from app.database import get_db, AsyncSessionLocal
 from app.models import Inspection, PhotoSet
 from app.schemas import PhotoSetOut
 from app.services import storage, photogrammetry
+from app.config import settings
 
 router = APIRouter(prefix="/inspections/{inspection_id}", tags=["uploads"])
 
@@ -102,11 +103,12 @@ async def upload_photos(
     start: bool = True,
     db: AsyncSession = Depends(get_db),
 ):
-    """Upload individual photos or a ZIP archive. Triggers 3D reconstruction.
+    """Upload individual photos or a ZIP archive. Auto-start is configurable.
 
     Hundreds of drone photos go in batches: first batch append=false,
     start=false (replaces the photo set), further batches append=true,
-    start=false, the last one append=true, start=true (starts the run)."""
+    start=false, the last one append=true, start=true. RAW deployment leaves
+    the set pending; /reprocess starts reconstruction explicitly."""
     await _get_inspection_or_404(inspection_id, db)
 
     # Don't wipe the photo set out from under a running reconstruction: the task
@@ -135,7 +137,10 @@ async def upload_photos(
         # All three branches touch disk (zip extract / frame extract / write each
         # file) — run off the event loop so a large upload can't stall the server.
         if ext == ".zip":
-            await asyncio.to_thread(storage.extract_zip, inspection_id, content)
+            try:
+                await asyncio.to_thread(storage.extract_zip, inspection_id, content)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
         elif ext in video_frames.VIDEO_EXTENSIONS:
             # Sample the video into sharp still frames, then treat as photos.
             with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
@@ -149,15 +154,23 @@ async def upload_photos(
             finally:
                 os.unlink(tmp_path)
         else:
-            await asyncio.to_thread(
-                storage.save_uploaded_photos, inspection_id, [(upload.filename, content)]
-            )
+            try:
+                await asyncio.to_thread(
+                    storage.save_uploaded_photos, inspection_id, [(upload.filename, content)]
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
 
     # Clear thumbnail cache when new photos arrive
     await asyncio.to_thread(_clear_thumbnail_cache, inspection_id)
 
     ps.photo_count = await asyncio.to_thread(storage.count_photos, inspection_id)
     ps.upload_dir = str(storage.get_photos_dir(inspection_id))
+    if start and not settings.auto_reconstruct:
+        ps.status = "pending"
+        await db.commit()
+        await db.refresh(ps)
+        return PhotoSetOut.model_validate(ps)
     if not start:                              # more batches to come
         await db.commit()
         await db.refresh(ps)
@@ -265,6 +278,14 @@ async def reprocess(
     if storage.count_photos(inspection_id) == 0:
         raise HTTPException(400, "Nebyly nalezeny žádné zdrojové snímky")
 
+    active = (await db.execute(select(PhotoSet).where(PhotoSet.status == 'processing'))).scalars().first()
+    if active:
+        raise HTTPException(409, "V RAW instanci už probíhá jiná rekonstrukce.")
+    import shutil
+    free = shutil.disk_usage(settings.upload_path).free / 1e9
+    if free < settings.disk_reserve_gb + 3:
+        raise HTTPException(507, f"Na SSD zbývá {free:.1f} GB; nejprve uvolněte místo pro rekonstrukci.")
+
     ps.status = "processing"
     ps.progress = 0
     ps.error_message = None
@@ -360,6 +381,65 @@ async def get_photo_set(inspection_id: str, db: AsyncSession = Depends(get_db)):
 
 
 # ─── Source photo listing ─────────────────────────────────────────────────────
+
+class LocalImportIn(BaseModel):
+    directory: str
+    filenames: list[str] | None = None
+
+
+@router.post('/import-local', response_model=PhotoSetOut, status_code=201)
+async def import_local(inspection_id: str, body: LocalImportIn,
+                       db: AsyncSession = Depends(get_db)):
+    """Link images from the configured read-only dataset, without duplicating RAWs."""
+    await _get_inspection_or_404(inspection_id, db)
+    if not settings.raw_source_root:
+        raise HTTPException(400, 'Lokální zdroj není nastaven')
+    source = Path(body.directory).resolve()
+    root = Path(settings.raw_source_root).resolve()
+    if not source.is_dir() or not source.is_relative_to(root):
+        raise HTTPException(403, 'Adresář není v povoleném zdroji')
+    ps = (await db.execute(select(PhotoSet).where(PhotoSet.inspection_id == inspection_id))).scalar_one_or_none()
+    if ps and ps.status == 'processing':
+        raise HTTPException(409, 'Rekonstrukce právě probíhá')
+    candidates = sorted(p for p in source.iterdir() if p.is_file()
+                        and p.suffix.lower() in storage.ALLOWED_IMAGE_EXTENSIONS)
+    if body.filenames is not None:
+        names = set(body.filenames)
+        candidates = [p for p in candidates if p.name in names]
+        if {p.name for p in candidates} != names:
+            raise HTTPException(400, 'Některé požadované fotografie nebyly nalezeny')
+    if not candidates:
+        raise HTTPException(400, 'Zdroj neobsahuje fotografie')
+    if any(not p.resolve().is_relative_to(root) for p in candidates):
+        raise HTTPException(403, 'Zdroj obsahuje odkaz mimo povolený adresář')
+    target = storage.get_photos_dir(inspection_id)
+    for p in candidates:
+        dest = target / p.name
+        if dest.exists() and dest.resolve() != p.resolve():
+            raise HTTPException(409, f'Soubor {p.name} už existuje')
+    for p in candidates:
+        dest = target / p.name
+        if not dest.exists():
+            dest.symlink_to(p)
+    if ps is None:
+        ps = PhotoSet(inspection_id=inspection_id)
+        db.add(ps)
+    ps.status = 'pending'
+    ps.photo_count = storage.count_photos(inspection_id)
+    ps.upload_dir = str(target)
+    await db.commit()
+    await db.refresh(ps)
+    return PhotoSetOut.model_validate(ps)
+
+
+@router.get('/photos/{filename}/original')
+async def original_photo(inspection_id: str, filename: str):
+    from app.services.raw_images import source_photo
+    try:
+        source = source_photo(inspection_id, filename)
+    except (ValueError, FileNotFoundError):
+        raise HTTPException(404, 'Snímek nenalezen')
+    return FileResponse(source, filename=filename, media_type='application/octet-stream')
 
 @router.get("/photos")
 async def list_photos(inspection_id: str):
@@ -758,36 +838,12 @@ async def photo_thumbnail(inspection_id: str, filename: str, size: int = 400):
     Return a JPEG thumbnail of a source photo, generated on first request and cached.
     EXIF rotation is applied automatically so phone photos appear upright.
     """
-    from PIL import Image, ImageOps
-
-    photos_dir = storage.get_photos_dir(inspection_id)
-    src = (photos_dir / filename).resolve()
-
-    # Prevent path traversal
+    from app.services.raw_images import source_photo, display_file
     try:
-        src.relative_to(photos_dir.resolve())
-    except ValueError:
-        raise HTTPException(403)
-
-    if not src.exists() or src.suffix.lower() not in storage.ALLOWED_IMAGE_EXTENSIONS:
+        src = source_photo(inspection_id, filename)
+        thumb = await asyncio.to_thread(display_file, src, max(100, min(size, 1200)))
+    except ValueError as exc:
+        raise HTTPException(403, str(exc))
+    except FileNotFoundError:
         raise HTTPException(404, "Snímek nenalezen")
-
-    # Clamp size to sane range
-    size = max(100, min(size, 1200))
-
-    thumb_dir = storage.get_inspection_dir(inspection_id) / "thumbnails"
-    thumb_dir.mkdir(exist_ok=True)
-    thumb_path = thumb_dir / f"{size}_{src.stem}.jpg"
-
-    if not thumb_path.exists():
-        with Image.open(src) as img:
-            img = ImageOps.exif_transpose(img)   # auto-rotate from EXIF orientation
-            img = img.convert("RGB")
-            img.thumbnail((size, size), Image.LANCZOS)
-            img.save(thumb_path, format="JPEG", quality=82, optimize=True)
-
-    return FileResponse(
-        thumb_path,
-        media_type="image/jpeg",
-        headers={"Cache-Control": "public, max-age=86400"},
-    )
+    return FileResponse(thumb, media_type="image/jpeg", headers={"Cache-Control": "no-cache"})

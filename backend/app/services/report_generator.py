@@ -157,7 +157,8 @@ def _outlined_defect_image(a: dict, cache: dict, max_w: float, max_h: float) -> 
     photo, uv = res
     try:
         from PIL import Image as PImage, ImageDraw, ImageOps
-        im = ImageOps.exif_transpose(PImage.open(photo)).convert("RGB")
+        from app.services.raw_images import display_file
+        im = ImageOps.exif_transpose(PImage.open(display_file(photo))).convert("RGB")
         im.thumbnail((1400, 1400), PImage.LANCZOS)
         w, h = im.size
         pts = [(p["u"] * w, p["v"] * h) for p in uv if p]
@@ -185,6 +186,8 @@ def _outlined_defect_image(a: dict, cache: dict, max_w: float, max_h: float) -> 
 def _fit_image(path: Path, max_w: float, max_h: float) -> Optional[Image]:
     """Load an image as a flowable scaled to fit within max_w × max_h (aspect kept)."""
     try:
+        from app.services.raw_images import display_file
+        path = display_file(path)
         iw, ih = ImageReader(str(path)).getSize()
         if not iw or not ih:
             return None
@@ -199,7 +202,8 @@ def _thumb_image(path: Path, max_w: float, max_h: float, max_px: int = 1400) -> 
     even with many full-resolution photos (crucial for the AI overview report)."""
     try:
         from PIL import Image as PImage
-        im = PImage.open(path).convert("RGB")
+        from app.services.raw_images import display_file
+        im = PImage.open(display_file(path)).convert("RGB")
         im.thumbnail((max_px, max_px), PImage.LANCZOS)
         bio = BytesIO()
         im.save(bio, format="JPEG", quality=82)

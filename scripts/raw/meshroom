@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+"""Meshroom wrapper for the isolated instance. Never builds/changes images."""
+import fcntl
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root = Path(os.environ['ISOLATED_DATA_ROOT']).resolve()
+tool = Path(os.environ['VISTA_MESHROOM_DIR']).resolve()
+source = Path(os.environ['RAW_SOURCE_ROOT']).resolve()
+mounts = ['-v', f'{tool}:/meshroom:ro', '-v', f'{root}:{root}:rw', '-v', f'{source}:{source}:ro']
+cache = os.environ.get('VISTA_MESHROOM_CACHE')
+if cache:
+    cache = Path(cache).resolve()
+    if not cache.is_relative_to(root):
+        raise SystemExit('Meshroom cache escapes isolated data root')
+    mounts += ['-v', f'{cache}:/tmp/MeshroomCache:rw']
+binary = os.environ.get('VISTA_MESHROOM_BIN')
+if binary and (not binary.startswith('aliceVision_') or Path(binary).name != binary):
+    raise SystemExit('Invalid AliceVision binary name')
+exe = '/meshroom/aliceVision/bin/' + binary if binary else '/meshroom/meshroom_batch'
+command = ['docker', 'run', '--rm', '--gpus', 'all', '--user', f'{os.getuid()}:{os.getgid()}',
+           *mounts, '-e', 'HOME=/tmp', '-e', 'ALICEVISION_ROOT=/meshroom/aliceVision',
+           '-e', 'LD_LIBRARY_PATH=/meshroom/aliceVision/lib', 'vista-meshroom:latest',
+           '/usr/bin/env', 'PYTHONUNBUFFERED=1', exe, *sys.argv[1:]]
+with open(os.environ.get('VISTA_GPU_LOCK', '/tmp/vista-gpu.lock'), 'a') as lock:
+    if '--version' not in sys.argv and '--help' not in sys.argv:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+    raise SystemExit(subprocess.call(command))

@@ -47,6 +47,9 @@ datasets/
 *.png
 *.tif
 *.tiff
+*.dng
+*.DNG
+raw-data/
 *.heic
 *.exr
 *.mp4

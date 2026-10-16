@@ -1,18 +1,22 @@
-version: '3.9'
+name: vista-raw-development
 
 services:
   backend:
     build: ./backend
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8001:8001"
     volumes:
       - ./backend:/app
-      - uploads_data:/app/uploads
+      - raw_data:/data
     environment:
-      - DATABASE_URL=sqlite+aiosqlite:///./vista.db
-      - UPLOAD_DIR=/app/uploads
-      - ODM_URL=http://odm:3000
-      - CORS_ORIGINS=http://localhost:5173
+      - ISOLATED_DATA_ROOT=/data
+      - DATABASE_URL=sqlite+aiosqlite:////data/vista.db
+      - UPLOAD_DIR=/data/uploads
+      - WORK_DIR=/data/scratch
+      - CORS_ORIGINS=http://localhost:5174
+      - AUTO_RECONSTRUCT=false
+      - JWT_SECRET=${JWT_SECRET:?Set a private RAW JWT_SECRET}
+      - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD:?Set a private RAW admin password}
     restart: unless-stopped
 
   frontend:
@@ -20,12 +24,12 @@ services:
       context: ./frontend
       target: dev
     ports:
-      - "5173:5173"
+      - "5174:5174"
     volumes:
       - ./frontend:/app
       - /app/node_modules
     environment:
-      - VITE_API_URL=http://localhost:8000
+      - VISTA_API_TARGET=http://backend:8001
     depends_on:
       - backend
     restart: unless-stopped
@@ -39,5 +43,5 @@ services:
   #     - odm_data:/var/www/data
 
 volumes:
-  uploads_data:
+  raw_data:
   # odm_data:

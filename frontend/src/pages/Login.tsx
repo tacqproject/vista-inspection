@@ -38,7 +38,7 @@ export default function Login() {
           <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center shadow-lg mb-3">
             <Building2 size={28} className="text-white" />
           </div>
-          <h1 className="text-xl font-bold tracking-[0.14em] text-white">VISTA</h1>
+          <h1 className="text-xl font-bold tracking-[0.14em] text-white">VISTA RAW</h1>
           <p className="text-[11px] text-slate-500 uppercase tracking-widest mt-1">
             Inspekce konstrukcí
           </p>

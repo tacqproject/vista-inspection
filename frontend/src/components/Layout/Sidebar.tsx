@@ -46,7 +46,7 @@ export default function Sidebar({ open = false, onClose }: { open?: boolean; onC
               <Building2 size={17} className="text-white" />
             </div>
             <div>
-              <span className="text-[15px] font-bold tracking-[0.14em]">VISTA</span>
+              <span className="text-[15px] font-bold tracking-[0.14em]">VISTA RAW</span>
               <p className="text-[10px] text-slate-500 uppercase tracking-widest leading-none mt-0.5">Inspekce konstrukcí</p>
             </div>
           </div>

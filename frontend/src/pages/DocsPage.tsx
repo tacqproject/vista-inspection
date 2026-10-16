@@ -172,7 +172,7 @@ function Arrow() {
 // ─── API docs (Swagger UI z backendu) ─────────────────────────────────────────
 
 function ApiTab() {
-  const swaggerUrl = `${window.location.protocol}//${window.location.hostname}:8000/docs`
+  const swaggerUrl = `${window.location.origin}/swagger`
   return (
     <div>
       <p className="text-sm text-gray-500 mb-3">

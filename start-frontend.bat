@@ -1,5 +1,5 @@
 @echo off
-cd frontend
+cd /d "%~dp0frontend"
 if not exist node_modules (
     npm install
 )

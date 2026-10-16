@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+
+tools = Path(os.environ['ISOLATED_DATA_ROOT']) / 'tools'
+os.execv(str(tools / 'node'), [str(tools / 'node'), str(tools / 'gltfpack/cli.js'), *sys.argv[1:]])
