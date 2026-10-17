@@ -643,30 +643,14 @@ async def get_pointcloud(inspection_id: str, db: AsyncSession = Depends(get_db))
         raise HTTPException(404, "SfM landmarky nejsou k dispozici — spusťte rekonstrukci znovu")
 
     cache = sfm_json.parent / "pointcloud.bin"
-    if not cache.exists() or cache.stat().st_mtime < sfm_json.stat().st_mtime:
-        await asyncio.to_thread(_build_pointcloud, sfm_json, cache)
+    await asyncio.to_thread(_build_pointcloud, sfm_json, cache)
 
     return FileResponse(cache, media_type="application/octet-stream")
 
 
 def _build_pointcloud(sfm_json, out_path):
-    import json as _json
-    import struct
-    import numpy as np
-
-    data = _json.loads(sfm_json.read_text())
-    landmarks = data.get("structure", [])
-    pos = np.empty((len(landmarks), 3), dtype=np.float32)
-    col = np.empty((len(landmarks), 3), dtype=np.uint8)
-    for i, lm in enumerate(landmarks):
-        x, y, z = (float(v) for v in lm["X"])
-        pos[i] = (x, -y, -z)   # SfM frame → mesh frame
-        c = lm.get("color", [200, 200, 200])
-        col[i] = c
-    with open(out_path, "wb") as f:
-        f.write(struct.pack("<I", len(landmarks)))
-        f.write(pos.tobytes())
-        f.write(col.tobytes())
+    from app.services.sparse_cloud import build_pointcloud
+    build_pointcloud(sfm_json, out_path)
 
 
 # ─── Camera poses for the viewer (Meshroom-style frustums) ───────────────────

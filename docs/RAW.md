@@ -234,3 +234,11 @@ DSINE worker spouští pouze v RAW instanci obal `dsine_offline.py`: vypíná
 nadbytečné stahování ImageNet inicializace, protože následné striktní načtení
 kompletního uloženého DSINE checkpointu obnoví všechny váhy enkodéru i dekodéru.
 Sdílený Docker image ani výsledné naučené váhy se tím nemění.
+
+Prohlížeč načítá bodové mračno přes přihlášený API klient. Převod velkého
+`sfm.json` na `pointcloud.bin` čte landmarky průběžně, barvy odkládá na SSD
+a finální soubor zveřejní atomicky. Souběžné požadavky sdílí výsledek pod
+zámkem; cache kontroluje identitu zdrojového exportu a délku binárního
+souboru. Test skutečných 98 885 landmarků (157,7 MB JSON) spotřeboval 33,5 MiB
+paměti procesu. Při nasazování této úpravy do již běžící rekonstrukce se
+restart API odkládá až po jejím dokončení; průběh nesmí zničit nasazení webu.

@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import * as THREE from 'three'
 import { useViewerStore } from '../../store/viewerStore'
+import { api } from '../../api/client'
 
 /**
  * Sparse SfM landmark cloud (Meshroom-style). Loads the compact binary from
@@ -14,9 +15,10 @@ export default function PointCloud({ inspectionId }: { inspectionId: string }) {
   const { data } = useQuery({
     queryKey: ['pointcloud', inspectionId],
     queryFn: async () => {
-      const res = await fetch(`/api/inspections/${inspectionId}/pointcloud`)
-      if (!res.ok) throw new Error('pointcloud unavailable')
-      return res.arrayBuffer()
+      const res = await api.get<ArrayBuffer>(`/inspections/${inspectionId}/pointcloud`, {
+        responseType: 'arraybuffer',
+      })
+      return res.data
     },
     staleTime: Infinity,
     retry: false,
