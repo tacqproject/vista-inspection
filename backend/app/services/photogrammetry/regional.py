@@ -19,6 +19,38 @@ from .runtime import (Checkpoints, atomic_json, fingerprint, identity, require_s
 
 VERSION = 1
 MAX_VIEWS = 32
+REFINE_NEIGHBORS = (8, 4)
+
+
+def resource_error(exc):
+    return any(x in str(exc).lower() for x in (
+        'code 137', 'kód 137', 'out of memory', 'out_of_memory',
+        'memory allocation failed', 'nedostatek místa', 'potřeba přibližně'))
+
+
+def refine_region(work, cp, log):
+    """Match v2's eight neighbours first; use four only after a resource error."""
+    from . import openmvs_bridge as O
+    output = work / 'mesh_refined.ply'
+    inputs = [identity(work/'scene_dense.mvs'), identity(work/'mesh.ply'), 0, REFINE_NEIGHBORS]
+    if cp.valid('refine', inputs):
+        return cp.data['refine']['max_views']
+    for neighbors in REFINE_NEIGHBORS:
+        output.unlink(missing_ok=True)  # discard only this step's invalid partial output
+        try:
+            O._mvs(work, 'RefineMesh', 'scene_dense.mvs', '--mesh-file', 'mesh.ply',
+                   '--resolution-level', '0', '--max-views', str(neighbors),
+                   '--max-threads', '4', '--close-holes', '30', '--decimate', '0',
+                   '-o', 'mesh_refined.ply', log=log)
+        except Exception as exc:
+            if neighbors == REFINE_NEIGHBORS[-1] or not resource_error(exc):
+                raise
+            log.write(f'\nRefineMesh: {exc}; opakuji v plném rozlišení se 4 sousedními pohledy.\n')
+            log.flush()
+            atomic_json(work/'refine-resource-retry.json', {'error': str(exc), 'next_neighbors': 4})
+            continue
+        cp.save('refine', inputs, [output], max_views=neighbors, resolution_level=0)
+        return neighbors
 
 
 def partition(points: np.ndarray, max_points=40000, max_regions=128):
@@ -95,6 +127,7 @@ def make_plan(sfm: Path, work: Path) -> dict:
     result = {'version': VERSION, 'sfm': str(sfm), 'regions': regions,
               'reliable_points': len(points), 'max_views': MAX_VIEWS,
               'dense_level': 0, 'refine_level': 0, 'texture': 'photo-resolution',
+              'refine_neighbors': list(REFINE_NEIGHBORS),
               'ai_preset': 'normal_prior.PRESET'}
     atomic_json(target, result)
     cp.save('plan', key, [target, *[Path(r['folder']) / 'landmarks.jsonl' for r in regions]])
@@ -216,7 +249,7 @@ async def run_regions(ctx, sfm, global_work, output):
     final_cp = Checkpoints(root / 'completed')
     for i, region in enumerate(plan['regions']):
         region_root = Path(region['folder'])
-        key = [identity(plan_path), i, bool(ctx.params.get('ai_normals')), VERSION]
+        key = [identity(plan_path), i, bool(ctx.params.get('ai_normals')), VERSION, REFINE_NEIGHBORS]
         if final_cp.valid(str(i), key):
             continue
         pct = 62 + int(32 * i / len(plan['regions']))
@@ -264,9 +297,7 @@ async def run_regions(ctx, sfm, global_work, output):
                         await cpu('region-crop', {'mesh':str(work/'mesh_full.ply'),'output':str(work/'mesh.ply'),
                             'plan':str(plan_path),'region':i,'wide':True}, work/'crop-result.json')
                         cp.save('crop',crop_key,[work/'mesh.ply'])
-                    await asyncio.to_thread(stage, 'refine', [identity(work/'mesh.ply'),0,4], ['mesh_refined.ply'], lambda: O._mvs(
-                        work,'RefineMesh','scene_dense.mvs','--mesh-file','mesh.ply','--resolution-level','0',
-                        '--max-views','4','--max-threads','4','--close-holes','30','--decimate','0','-o','mesh_refined.ply',log=lf))
+                    refine_neighbors = await asyncio.to_thread(refine_region, work, cp, lf)
                 mesh = work/'mesh_refined.ply'
                 if ctx.params.get('ai_normals'):
                     ai_key = [identity(mesh),identity(work/'sparse/images.txt')]
@@ -285,6 +316,7 @@ async def run_regions(ctx, sfm, global_work, output):
                 bake=await cpu('region-bake',{'work':str(work),'mesh':str(work/'mesh_final.ply'),
                     'output':str(region_out),'plan':str(plan_path),'region':i},work/'bake-result.json')
                 atomic_json(region_root/'result.json',{'views':exp['views'],'dense_level':0,'refine_level':0,
+                    'refine_neighbors':refine_neighbors,
                     'ai_normals':bool(ctx.params.get('ai_normals')),'bake':bake,'work':str(work)})
                 outputs=[region_out/'texturedMesh.obj',region_out/'texturedMesh.mtl',*sorted(region_out.glob('texture_*.jpg'))]
                 final_cp.save(str(i),key,outputs)
@@ -302,10 +334,7 @@ async def run_regions(ctx, sfm, global_work, output):
                 with log.open('a') as lf:
                     lf.write(f'\nČást {i+1}, {max_views} kamer: {exc}\n')
                 # Retry only resource-related failures, never data/geometry errors.
-                resource_error=any(x in str(exc).lower() for x in (
-                    'code 137', 'kód 137', 'out of memory', 'out_of_memory',
-                    'memory allocation failed', 'nedostatek místa', 'potřeba přibližně'))
-                if not resource_error or max_views==16:
+                if not resource_error(exc) or max_views==16:
                     raise
                 atomic_json(region_root/f'retry-{max_views}.json',{'error':str(exc),'next_views':24 if max_views==32 else 16})
                 # An unsuccessful dense attempt must not crowd out its retry.

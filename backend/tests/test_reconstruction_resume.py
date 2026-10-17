@@ -1,4 +1,5 @@
 import json
+import io
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,6 +12,47 @@ from app.services.photogrammetry.postprocess.openmvs import dense_pixels
 
 
 class ResumeTests(unittest.TestCase):
+    def test_refinement_keeps_reference_views_and_only_reduces_after_oom(self):
+        from app.services.photogrammetry.regional import refine_region
+        from app.services.photogrammetry.openmvs_bridge import OpenMVSError
+        for oom in (False, True):
+            with self.subTest(oom=oom), tempfile.TemporaryDirectory() as temp:
+                work = Path(temp)
+                (work/'mesh.ply').write_text('input mesh')
+                (work/'scene_dense.mvs').write_text('camera scene')
+                output = work/'mesh_refined.ply'
+                output.write_text('invalid partial from an interrupted attempt')
+                calls = []
+                def native(folder, *args, **kwargs):
+                    neighbors = int(args[args.index('--max-views')+1])
+                    calls.append(neighbors)
+                    self.assertEqual(args[args.index('--resolution-level')+1], '0')
+                    self.assertFalse(output.exists())
+                    if oom and neighbors == 8:
+                        output.write_text('partial output before OOM')
+                        raise OpenMVSError('RefineMesh', 137)
+                    output.write_text('complete refined mesh')
+                cp = Checkpoints(work/'stages')
+                with patch('app.services.photogrammetry.openmvs_bridge._mvs', side_effect=native):
+                    used = refine_region(work, cp, io.StringIO())
+                self.assertEqual(calls, [8,4] if oom else [8])
+                self.assertEqual(used, 4 if oom else 8)
+                with patch('app.services.photogrammetry.openmvs_bridge._mvs', side_effect=AssertionError('must resume')):
+                    self.assertEqual(refine_region(work, Checkpoints(work/'stages'), io.StringIO()), used)
+
+    def test_refinement_does_not_retry_geometry_error_with_cuda_banner(self):
+        from app.services.photogrammetry.regional import refine_region
+        from app.services.photogrammetry.openmvs_bridge import OpenMVSError
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            (work/'mesh.ply').write_text('mesh')
+            (work/'scene_dense.mvs').write_text('scene')
+            error = OpenMVSError('RefineMesh', 1, 'CUDA device initialized; invalid mesh')
+            with patch('app.services.photogrammetry.openmvs_bridge._mvs', side_effect=error) as native:
+                with self.assertRaises(OpenMVSError):
+                    refine_region(work, Checkpoints(work/'stages'), io.StringIO())
+            self.assertEqual(native.call_count, 1)
+
     def test_regions_cover_uneven_spatial_cloud_in_shared_frame(self):
         import numpy as np
         from scipy.spatial import cKDTree

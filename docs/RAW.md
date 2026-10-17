@@ -198,7 +198,8 @@ vzniknou jeden model, tři glTF úrovně a dlaždice sestavené po částech.
 
 Počet částí se odvozuje z konkrétního SfM, nikoli z původního mostu. Výpočet
 pracuje nejvýše s 32 kamerami na část (při nedostatku prostředků 24, pak 16),
-čtyřmi sousedními pohledy pro zpřesnění a přibližným rozpočtem šesti milionů
+osmi sousedními pohledy pro zpřesnění (stejně jako výchozí referenční v2;
+teprve při paměťové chybě čtyřmi) a přibližným rozpočtem šesti milionů
 bodů při síťování. Hloubkové mapy mají úroveň 0 a strop 8192 px: všechny
 Corvallis DNG 5472 × 3648 se vejdou bez zmenšení. To zachovává pixelové
 rozlišení, **není to záruka stejné geometrické kvality u jinak nafoceného mostu**.
