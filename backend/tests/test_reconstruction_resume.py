@@ -343,6 +343,61 @@ class ResumeTests(unittest.TestCase):
                 exported = np.array(row.split(), float).reshape(-1, 3)[:, :2]
                 np.testing.assert_allclose(exported, ideal, atol=1e-8, rtol=0)
 
+    def test_native_non_square_calibration_in_export_viewer_and_metrics(self):
+        import numpy as np
+        from PIL import Image
+        from app.services.sfm import load_cameras, _project_into_camera
+        from app.services.mesh_quality import reprojection_rms
+        from app.services.raw_images import read_bgr
+        from app.services.photogrammetry.runtime import identity
+        with tempfile.TemporaryDirectory() as temp, patch.object(settings, 'disk_reserve_gb', 0):
+            root = Path(temp)
+            src = root/'source.jpg'
+            Image.new('RGB', (192, 128), 'gray').save(src)
+            scale = 192 / 5472
+            fx, fy = np.array([4334.781106170077, 4338.781106170077]) * scale
+            cx, cy = np.array([2734.524624736311, 1764.4818708660045]) * scale
+            distortion = [-.1838815068670066, -.017507539183009464, .049485392056877735]
+            ideal = np.array([[2., 2.], [190., 2.], [2., 126.], [190., 126.]])
+            xy = (ideal - [cx, cy]) / [fx, fy]
+            r2 = np.sum(xy**2, axis=1)
+            radial = 1 + distortion[0]*r2 + distortion[1]*r2**2 + distortion[2]*r2**3
+            observed = xy * radial[:, None] * [fx, fy] + [cx, cy]
+            data = {
+                'intrinsics': [{'intrinsicId': 'i', 'width': 192, 'height': 128,
+                    'sensorWidth': '13.199999999999999', 'focalLength': '10.466357931550624',
+                    'pixelRatio': '1.0009227686247655', 'principalPoint': [cx-96, cy-64],
+                    'distortionParams': distortion}],
+                'poses': [{'poseId': str(i), 'pose': {'transform': {
+                    'rotation': [1,0,0,0,1,0,0,0,1], 'center': [0,0,0]}}} for i in range(2)],
+                'views': [{'viewId': str(i), 'poseId': str(i), 'intrinsicId': 'i', 'path': str(src)} for i in range(2)],
+                'structure': [{'X': [*ray, 1.], 'observations': [
+                    {'observationId': str(i), 'x': uv.tolist()} for i in range(2)]}
+                    for ray, uv in zip(xy, observed)],
+            }
+            sfm = root/'sfm.json'; sfm.write_text(json.dumps(data))
+            for cam in load_cameras(sfm):
+                np.testing.assert_allclose([cam.fx, cam.fy], [fx, fy], atol=1e-12, rtol=0)
+                for ray, uv in zip(xy, observed):
+                    np.testing.assert_allclose(np.array(_project_into_camera(cam, *ray, 1.))*[192,128],
+                                               uv, atol=1e-10, rtol=0)
+            self.assertLess(reprojection_rms(sfm)['reproj_rms_px'], 1e-10)
+            # An old checkpoint lacks the interpreted K/distortion. It must not
+            # silently reuse images undistorted with the former swapped scales.
+            scene = root/'scene'; (scene/'images').mkdir(parents=True)
+            cp = Checkpoints(scene/'image-checkpoints')
+            for i in range(1, 3):
+                target = scene/'images'/f'{i:05d}.jpg'
+                Image.new('RGB', (192,128), 'black').save(target)
+                cp.save(target.name, [identity(sfm), identity(src), 0, 95, None], [target])
+            with patch('app.services.raw_images.read_bgr', wraps=read_bgr) as decoder:
+                export_colmap(sfm, scene)
+                self.assertEqual(decoder.call_count, 2)
+            lines = (scene/'sparse/images.txt').read_text().splitlines()
+            for row in (lines[1], lines[3]):
+                exported = np.array(row.split(), float).reshape(-1, 3)[:, :2]
+                np.testing.assert_allclose(exported, ideal, atol=1e-8, rtol=0)
+
 
 if __name__ == '__main__':
     unittest.main()

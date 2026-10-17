@@ -103,9 +103,9 @@ def load_cameras(sfm_path: Path) -> list[Camera]:
             else:
                 fx = fy = float(pxf)
         else:
-            # mm focal length + sensor width → px
-            fx = float(intr["focalLength"]) / float(intr.get("sensorWidth", 36.0)) * width
-            fy = fx / float(intr.get("pixelRatio", 1.0))
+            # AliceVision stores scaleY in mm and pixelRatio=scaleY/scaleX.
+            fy = float(intr["focalLength"]) / float(intr.get("sensorWidth", 36.0)) * width
+            fx = fy / float(intr.get("pixelRatio", 1.0))
 
         if not (fx > 0 and fy > 0):
             continue  # degenerate intrinsic — unprojection would divide by zero

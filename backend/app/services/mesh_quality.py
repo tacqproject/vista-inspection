@@ -112,9 +112,9 @@ def reprojection_rms(sfm_json: Path) -> dict:
             fx, fy = float(pxf[0]), float(pxf[1])
         elif pxf is not None:
             fx = fy = float(pxf)
-        else:                                   # mm focal + sensor width → px
-            fx = float(it["focalLength"]) / float(it.get("sensorWidth", 36.0)) * w
-            fy = fx / float(it.get("pixelRatio", 1.0))
+        else:                                   # AliceVision mm focal is scaleY
+            fy = float(it["focalLength"]) / float(it.get("sensorWidth", 36.0)) * w
+            fx = fy / float(it.get("pixelRatio", 1.0))
         pp = it.get("principalPoint", [0, 0])
         dp = [float(x) for x in it.get("distortionParams", [])[:3]] + [0.0] * 3
         cams[v["viewId"]] = S.Camera(v["path"], w, h, [float(x) for x in pose["rotation"]],

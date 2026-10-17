@@ -14,6 +14,19 @@ import gps_map
 
 
 class MatchReviewTests(unittest.TestCase):
+    def test_native_alicevision_non_square_calibration(self):
+        # Values serialized by the installed AliceVision after setting unequal
+        # scaleX/scaleY. The mm focal is based on scaleY, not scaleX.
+        intrinsic = {'type': 'pinhole', 'distortionType': 'radialk3',
+                     'width': '5472', 'height': '3648', 'sensorWidth': '13.199999999999999',
+                     'focalLength': '10.466357931550624', 'pixelRatio': '1.0009227686247655',
+                     'principalPoint': ['-1.4753752636888402', '-59.51812913399548'],
+                     'distortionParams': [-.1838815068670066, -.017507539183009464, .049485392056877735]}
+        camera = colmap.Camera(camera_id=1, **gps_sfm.camera_parameters(intrinsic))
+        np.testing.assert_allclose(camera.params[:4],
+                                   [4334.781106170077, 4338.781106170077,
+                                    2734.524624736311, 1764.4818708660045], atol=1e-10, rtol=0)
+
     def test_calibration_relative_pose_import_and_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

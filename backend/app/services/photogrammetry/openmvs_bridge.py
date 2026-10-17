@@ -98,8 +98,9 @@ def export_colmap(sfm_json: Path, out_dir: Path, max_side: int = 0, quality: int
         elif pxf is not None:
             fx = fy = float(pxf)
         else:
-            fx = float(it["focalLength"]) / float(it.get("sensorWidth", 36.0)) * w
-            fy = fx / float(it.get("pixelRatio", 1.0))
+            # AliceVision serializes scaleY as focalLength and scaleY/scaleX as pixelRatio.
+            fy = float(it["focalLength"]) / float(it.get("sensorWidth", 36.0)) * w
+            fx = fy / float(it.get("pixelRatio", 1.0))
         pp = [float(x) for x in it.get("principalPoint", [0, 0])]
         K = np.array([[fx, 0, w / 2 + pp[0]], [0, fy, h / 2 + pp[1]], [0, 0, 1]], float)
         dp = [float(x) for x in it.get("distortionParams", [])[:3]] + [0.0] * 3
@@ -115,14 +116,15 @@ def export_colmap(sfm_json: Path, out_dir: Path, max_side: int = 0, quality: int
                       "w": w, "h": h, "s": s, "name": name})
     by_view = {vw["view"]["viewId"]: vw for vw in views}
     cp = Checkpoints(out_dir)
-    inputs = {'version': 3, 'sfm': identity(Path(sfm_json)), 'max_side': max_side,
+    inputs = {'version': 4, 'sfm': identity(Path(sfm_json)), 'max_side': max_side,
               'quality': quality, 'interp': interp,
               'sources': [identity(Path(vw['view']['path'])) for vw in views]}
     if cp.valid('export', inputs):
         return cp.data['export']['summary']
     image_cp = Checkpoints(out_dir / 'image-checkpoints')
     def image_inputs(vw):
-        return [inputs['sfm'], identity(Path(vw['view']['path'])), max_side, quality, interp]
+        return [inputs['sfm'], identity(Path(vw['view']['path'])), max_side, quality, interp,
+                vw['K'].tolist(), vw['dist'].tolist()]
     from .runtime import require_space
     missing_bytes = sum(int(v['w'] * v['h'] * v['s'] ** 2 * 2.2) for v in views
                         if not image_cp.valid(v['name'], image_inputs(v)))

@@ -20,7 +20,7 @@ import time
 import numpy as np
 import pycolmap as colmap
 
-VERSION = 1
+VERSION = 2
 ROOT = Path('/media/epr/ssd/vista-raw')
 WORKERS = 4
 
@@ -66,8 +66,9 @@ def camera_parameters(intrinsic):
     elif focal is not None:
         fx = fy = float(focal)
     else:
-        fx = float(intrinsic['focalLength']) / float(intrinsic['sensorWidth']) * w
-        fy = fx / float(intrinsic.get('pixelRatio', 1))
+        # AliceVision stores focalLength from scaleY and pixelRatio=scaleY/scaleX.
+        fy = float(intrinsic['focalLength']) / float(intrinsic['sensorWidth']) * w
+        fx = fy / float(intrinsic.get('pixelRatio', 1))
     dx, dy = map(float, intrinsic.get('principalPoint', [0, 0]))
     distortion = [float(x) for x in intrinsic.get('distortionParams', [])]
     if len(distortion) not in (0, 3):
