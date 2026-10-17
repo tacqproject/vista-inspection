@@ -246,7 +246,7 @@ async def _run_reconstruction(
 # ─── Reprocess (retry) reconstruction ─────────────────────────────────────────
 
 class ReprocessIn(BaseModel):
-    quality: str = "standard"          # draft | standard | high | max
+    quality: str = "max"               # draft | standard | high | max
     keep_largest_mesh: bool = True     # drop floating fragments
     max_points: int | None = None      # mesh density override
     texture_size: int | None = None    # 4096 / 8192
@@ -254,9 +254,10 @@ class ReprocessIn(BaseModel):
     refine_faces: int | None = None    # decimation target (default 600k)
     pipeline: str | None = None        # imported Meshroom .mg template filename
     web_postprocess: bool = True       # textures/LODs/mobile chain
-    ai_normals: bool = True            # max: AI (DSINE) normal-guided denoising
-    ai_defects: bool = True            # AI defect detection on photos → annotations
-    photo_prep: bool = True            # exposure balance, shadow lift, cull blurred/duplicates
+    ai_normals: bool = False           # optional after the base reconstruction
+    regional: bool = False             # full resolution in sequential spatial regions
+    ai_defects: bool = False
+    photo_prep: bool = False
 
 
 @router.post("/reprocess", response_model=PhotoSetOut, status_code=202)
@@ -390,13 +391,13 @@ class LocalImportIn(BaseModel):
 @router.post('/import-local', response_model=PhotoSetOut, status_code=201)
 async def import_local(inspection_id: str, body: LocalImportIn,
                        db: AsyncSession = Depends(get_db)):
-    """Link images from the configured read-only dataset, without duplicating RAWs."""
+    """Link images from configured read-only datasets, without duplicating RAWs."""
     await _get_inspection_or_404(inspection_id, db)
-    if not settings.raw_source_root:
+    roots = settings.raw_source_paths
+    if not roots:
         raise HTTPException(400, 'Lokální zdroj není nastaven')
     source = Path(body.directory).resolve()
-    root = Path(settings.raw_source_root).resolve()
-    if not source.is_dir() or not source.is_relative_to(root):
+    if not source.is_dir() or not any(source.is_relative_to(root) for root in roots):
         raise HTTPException(403, 'Adresář není v povoleném zdroji')
     ps = (await db.execute(select(PhotoSet).where(PhotoSet.inspection_id == inspection_id))).scalar_one_or_none()
     if ps and ps.status == 'processing':
@@ -410,7 +411,7 @@ async def import_local(inspection_id: str, body: LocalImportIn,
             raise HTTPException(400, 'Některé požadované fotografie nebyly nalezeny')
     if not candidates:
         raise HTTPException(400, 'Zdroj neobsahuje fotografie')
-    if any(not p.resolve().is_relative_to(root) for p in candidates):
+    if any(not any(p.resolve().is_relative_to(root) for root in roots) for p in candidates):
         raise HTTPException(403, 'Zdroj obsahuje odkaz mimo povolený adresář')
     target = storage.get_photos_dir(inspection_id)
     for p in candidates:

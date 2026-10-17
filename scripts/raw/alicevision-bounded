@@ -1,0 +1,4 @@
+#!/bin/sh
+# Mounted over selected binaries ONLY inside a RAW worker. The installed
+# Meshroom and all production files stay read-only and unchanged.
+exec "/meshroom-native/aliceVision/bin/${0##*/}" "$@" --maxCoresAvailable 8 --maxMemoryAvailable 21474836480

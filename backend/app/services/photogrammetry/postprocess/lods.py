@@ -75,9 +75,15 @@ async def generate_lods(obj_file: Path, prefix: str = "model") -> Path | None:
 
 @postprocess_step("generate-lods", order=30)
 async def run(ctx: ReconstructionContext) -> None:
+    if ctx.params.get('_regional_plan'):
+        return  # generated incrementally from regions, without loading one huge OBJ
     if not ctx.obj_file or not ctx.params.get("web_postprocess", True):
         return
     await ctx.report(98, "Generování LOD úrovní…")
-    lod0 = await generate_lods(ctx.obj_file)
+    from ..runtime import run_python_stage
+    result = await asyncio.to_thread(run_python_stage, 'lods', {
+        'mesh': str(ctx.obj_file), 'result': str(ctx.models_dir / 'lod-result.json')},
+        ctx.models_dir / 'lod.log')
+    lod0 = Path(result['model'])
     if lod0:
         ctx.result["model_path"] = lod0

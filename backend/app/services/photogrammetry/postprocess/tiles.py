@@ -28,13 +28,13 @@ async def run(ctx: ReconstructionContext) -> None:
     await ctx.report(99, "Příprava streamovaných dlaždic (detail při přiblížení)…")
     log_file = lod0.parent / "tiles_build.log"
     try:
-        with open(log_file, "w") as fh:
-            proc = await asyncio.create_subprocess_exec(
-                *tiles.build_command(lod0), cwd=tiles.BACKEND_DIR,
-                stdout=fh, stderr=asyncio.subprocess.STDOUT,
-            )
-            rc = await proc.wait()
-        if rc != 0:
-            log.warning("tile build failed (rc=%s), see %s", rc, log_file)
+        from ..runtime import run_python_stage
+        if ctx.params.get('_regional_plan'):
+            await asyncio.to_thread(run_python_stage, 'region-tiles', {
+                'plan': ctx.params['_regional_plan'], 'output': str(lod0.parent),
+                'result': str(ctx.models_dir / 'tiles-result.json')}, log_file)
+            return
+        await asyncio.to_thread(run_python_stage, 'tiles', {
+            'mesh': str(lod0), 'result': str(ctx.models_dir / 'tiles-result.json')}, log_file)
     except Exception as e:  # noqa: BLE001 — never fail a reconstruction over tiles
         log.warning("tile build could not start: %s", e)

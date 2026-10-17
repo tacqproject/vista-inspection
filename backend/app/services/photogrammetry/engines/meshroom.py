@@ -13,6 +13,8 @@ Reconstruction params (ctx.params):
 """
 
 import asyncio
+from contextlib import suppress
+import json
 import os
 import shutil
 from pathlib import Path
@@ -59,7 +61,8 @@ QUALITY_PRESETS = {
     },
 }
 
-# Pipeline stage names (matched in stdout) → approximate progress %
+# Pipeline stage names → approximate progress %. Read actual chunk status files:
+# stdout also mentions unexecuted nodes in graph listings and failure cleanup.
 _STAGES = [
     ("CameraInit",          5,  "Inicializace kamer…"),
     ("FeatureExtraction",   15, "Extrakce příznaků snímků…"),
@@ -90,6 +93,13 @@ def build_overrides(params: dict | None) -> list[str]:
     params = params or {}
     overrides = dict(QUALITY_PRESETS.get(params.get("quality", "standard"),
                                          QUALITY_PRESETS["standard"]))
+    # AliceVision's extraction scheduler sees host RAM/cores, ignoring the
+    # worker's 24 GiB cgroup and OMP_NUM_THREADS. Eight concurrent 20 MP DNGs
+    # leave headroom; automatic mode launched 28 and was killed by the OOM killer.
+    overrides["FeatureExtraction:maxThreads"] = 8
+    # Sparse-cloud coloring used almost the entire 24 GiB worker, then OOM.
+    # Mesh texturing later uses the source photos independently.
+    overrides["StructureFromMotion:computeStructureColor"] = "False"
     if params.get("keep_largest_mesh", True):
         overrides["MeshFiltering:keepLargestMeshOnly"] = "True"
     if params.get("max_points"):
@@ -99,6 +109,56 @@ def build_overrides(params: dict | None) -> list[str]:
     if params.get("texture_downscale"):
         overrides["Texturing:downscale"] = int(params["texture_downscale"])
     return [f"{k}={v}" for k, v in overrides.items()]
+
+
+def _cache_progress(cache_dir: Path, previous_project_mtime: int | None) -> tuple[int, str] | None:
+    """Only count chunks in the graph saved for this run, including cache hits."""
+    project = cache_dir / "project.mg"
+    try:
+        if project.stat().st_mtime_ns == previous_project_mtime:
+            return None  # old graph while meshroom_batch initializes its new one
+        graph = json.loads(project.read_text())["graph"]
+    except (OSError, ValueError, KeyError):
+        return None  # file may be between writes
+    progress = None
+    for index, (stage, pct, message) in enumerate(_STAGES):
+        statuses = []
+        for node in graph.values():
+            if node.get("nodeType") != stage:
+                continue
+            uid = str(node.get("uid", ""))
+            if not uid or Path(uid).name != uid:
+                continue
+            folder = cache_dir / stage / uid
+            split = max(1, node.get("parallelization", {}).get("split", 1))
+            chunked = node.get("parallelization", {}).get("blockSize", 0) > 0
+            files = ([folder / f"{i}.status" for i in range(split)]
+                     if chunked else [folder / "status"])
+            for path in files:
+                try:
+                    statuses.append(json.loads(path.read_text()).get("status"))
+                except (OSError, ValueError):
+                    statuses.append(None)
+        if not any(s in {"RUNNING", "SUCCESS", "ERROR", "STOPPED"} for s in statuses):
+            continue
+        done = statuses.count("SUCCESS")
+        end = _STAGES[index + 1][1] if index + 1 < len(_STAGES) else 96
+        pct += (end - pct - 1) * done // len(statuses)
+        detail = f" ({done}/{len(statuses)} dávek hotovo)" if len(statuses) > 1 else ""
+        progress = pct, f"Meshroom: {message}{detail}"
+    return progress
+
+
+async def _track_progress(ctx, cache_dir, proc, previous_project_mtime):
+    previous = None
+    while True:
+        progress = await asyncio.to_thread(_cache_progress, cache_dir, previous_project_mtime)
+        if progress and progress != previous:
+            await ctx.report(*progress)
+            previous = progress
+        if proc.returncode is not None:
+            return
+        await asyncio.sleep(2)
 
 
 async def _check() -> dict:
@@ -127,6 +187,10 @@ async def run(ctx: ReconstructionContext) -> None:
     output_dir.mkdir(exist_ok=True)
     cache_dir = ctx.models_dir / "meshroom_cache"
     cache_dir.mkdir(exist_ok=True)
+    from ..runtime import recover_interrupted_statuses
+    recovered = recover_interrupted_statuses(cache_dir)
+    if recovered:
+        await ctx.report(2, f"Obnovení po přerušení: {recovered} nedokončených dávek; hotové zůstávají.")
 
     exe = _find_binary()
     if not exe:
@@ -169,29 +233,28 @@ async def run(ctx: ReconstructionContext) -> None:
 
     await ctx.report(3, "Spouštím Meshroom pipeline…")
 
+    project = cache_dir / "project.mg"
+    previous_project_mtime = project.stat().st_mtime_ns if project.exists() else None
     proc = await asyncio.create_subprocess_exec(
         *cmd, env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
 
-    reported: set[str] = set()
+    tracker = asyncio.create_task(_track_progress(ctx, cache_dir, proc, previous_project_mtime))
     assert proc.stdout is not None
-    with open(log_file, "w", encoding="utf-8") as lf:
-        async for raw in proc.stdout:
-            line = raw.decode("utf-8", errors="replace")
-            lf.write(line)
-            lf.flush()
-            line = line.strip()
-            if not line:
-                continue
-            for stage, pct, msg in _STAGES:
-                if stage in line and stage not in reported:
-                    reported.add(stage)
-                    await ctx.report(pct, f"Meshroom: {msg}")
-                    break
-
-    rc = await proc.wait()
+    try:
+        with open(log_file, "a", encoding="utf-8") as lf:
+            lf.write("\n=== Nový běh / pokračování rekonstrukce ===\n")
+            async for raw in proc.stdout:
+                lf.write(raw.decode("utf-8", errors="replace"))
+                lf.flush()
+        rc = await proc.wait()
+        await tracker  # include the last completed/failed chunk status
+    finally:
+        tracker.cancel()
+        with suppress(asyncio.CancelledError):
+            await tracker
     if rc != 0:
         raise RuntimeError(f"Meshroom skončil s chybou (kód {rc}). Detaily: {log_file}")
 

@@ -36,6 +36,7 @@ class RawIsolationTests(unittest.TestCase):
         self.patches = [patch.object(settings, 'upload_dir', str(self.root / 'uploads')),
                         patch.object(settings, 'work_dir', str(self.root / 'scratch')),
                         patch.object(settings, 'raw_source_root', str(self.source)),
+                        patch.object(settings, 'raw_source_roots', []),
                         patch.object(settings, 'disk_reserve_gb', 0)]
         for p in self.patches:
             p.start()
@@ -127,6 +128,54 @@ class RawIsolationTests(unittest.TestCase):
         (self.root / 'escape').symlink_to(self.base)
         with self.assertRaises(ValueError):
             Settings(**{**config, 'work_dir': str(self.root / 'escape')})
+
+    def test_python_worker_is_fixed_and_cannot_write_sources(self):
+        repo = Path(broker.__file__).resolve().parents[2]
+        payload = {'mesh': str(self.root / 'mesh.obj'), 'result': str(self.root / 'result.json')}
+        def validate(stage, data):
+            return broker.validate(['python-stage', stage, json.dumps(data)], self.root,
+                                   [self.source, repo], '1000:1000', {'ubuntu:22.04': 'sha256:test'})
+        command, name = validate('lods', payload)
+        self.assertIn('--read-only', command)
+        self.assertIn('24g', command)
+        self.assertIn('app.services.photogrammetry.worker', command)
+        with self.assertRaises(ValueError):
+            validate('shell', payload)
+        with self.assertRaises(ValueError):
+            validate('lods', {**payload, 'result': str(self.source / 'write.json')})
+        with self.assertRaises(ValueError):
+            validate('lods', {**payload, 'code': 'arbitrary'})
+
+    def test_additional_readonly_dataset_preserves_source_boundaries(self):
+        second = self.base / 'second-dataset'
+        second.mkdir()
+        original = second / 'frame.DNG'
+        original.write_bytes(b'second dataset RAW')
+        link = storage.get_photos_dir('second-inspection') / original.name
+        link.symlink_to(original)
+        with self.assertRaises(ValueError):
+            raw_images.source_photo('second-inspection', original.name)
+        with patch.object(settings, 'raw_source_roots', [str(second)]):
+            self.assertEqual(raw_images.source_photo('second-inspection', original.name), link)
+            outside = self.base / 'private.DNG'
+            outside.write_bytes(b'not a dataset')
+            bad = link.with_name('bad.DNG')
+            bad.symlink_to(outside)
+            with self.assertRaises(ValueError):
+                raw_images.source_photo('second-inspection', bad.name)
+            command, _ = broker.validate(
+                ['run', '--rm', '-v', f'{second}:{second}:ro', 'vista-meshroom:latest', 'job'],
+                self.root, [self.source, second], '1000:1000', {'vista-meshroom:latest': 'sha256:test'})
+            self.assertIn(f'{second}:{second}:ro', command)
+            with self.assertRaises(ValueError):
+                broker.validate(
+                    ['run', '--rm', '-v', f'{second}:{second}:rw', 'vista-meshroom:latest', 'job'],
+                    self.root, [self.source, second], '1000:1000', {'vista-meshroom:latest': 'sha256:test'})
+        with self.assertRaises(ValueError):
+            Settings(_env_file=None, isolated_data_root=str(self.root),
+                     database_url=f'sqlite+aiosqlite:///{self.root}/vista.db',
+                     upload_dir=str(self.root / 'uploads'), work_dir=str(self.root / 'scratch'),
+                     raw_source_roots=[str(self.root / 'disguised-source')])
 
     def test_png_resolution_budget_uses_real_dimensions(self):
         from app.services.photogrammetry.postprocess.openmvs import _dense_level

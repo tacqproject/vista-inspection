@@ -44,7 +44,6 @@ export default function InspectionDetail() {
   const [showAiDefects, setShowAiDefects] = useState(false)
   const [showAi, setShowAi] = useState(false)
   const [liveProgress, setLiveProgress] = useState<{ pct: number; message: string } | null>(null)
-  const [retrying, setRetrying] = useState(false)
   const [showReprocess, setShowReprocess] = useState(false)
   const [showEditInsp, setShowEditInsp] = useState(false)
   const [cropping, setCropping] = useState(false)
@@ -218,19 +217,6 @@ export default function InspectionDetail() {
     return () => window.removeEventListener('keydown', onKey)
   }, [tool])
 
-  const handleRetry = async () => {
-    if (!inspectionId) return
-    setRetrying(true)
-    try {
-      await uploadsApi.reprocess(inspectionId)
-      setLiveProgress({ pct: 0, message: 'Spouštím rekonstrukci…' })
-      qc.invalidateQueries({ queryKey: ['inspection', structureId, inspectionId] })
-    } catch (err: any) {
-      alert(errorMessage(err, 'Rekonstrukci se nepodařilo spustit'))
-    } finally {
-      setRetrying(false)
-    }
-  }
 
 
   const finishPolygon = () => {
@@ -481,12 +467,11 @@ export default function InspectionDetail() {
             Rekonstrukce selhala{photoSet.error_message ? `: ${photoSet.error_message}` : ''}
           </span>
           <button
-            onClick={handleRetry}
-            disabled={retrying}
+            onClick={() => setShowReprocess(true)}
             className="flex items-center gap-1.5 bg-red-600 text-white text-xs px-3 py-1.5 rounded-lg hover:bg-red-500 disabled:opacity-50 transition-colors shrink-0"
           >
-            <RefreshCw size={13} className={retrying ? 'animate-spin' : ''} />
-            {retrying ? 'Spouštím…' : 'Zkusit znovu'}
+            <RefreshCw size={13} />
+            Zkusit znovu
           </button>
         </div>
       )}
@@ -977,6 +962,7 @@ function ReprocessModal({ inspectionId, onClose, onStarted }: {
   const [refineMesh, setRefineMesh] = useState(true)
   const [webPostprocess, setWebPostprocess] = useState(true)
   const [aiNormals, setAiNormals] = useState(true)
+  const [regional, setRegional] = useState(true)
   const [aiDefects, setAiDefects] = useState(false)
   const [photoPrep, setPhotoPrep] = useState(false)
   const [pipeline, setPipeline] = useState('')   // '' = built-in default
@@ -1007,6 +993,7 @@ function ReprocessModal({ inspectionId, onClose, onStarted }: {
         refine_mesh: refineMesh,
         web_postprocess: webPostprocess,
         ai_normals: aiNormals,
+        regional: quality === 'max' && regional,
         ai_defects: aiDefects,
         photo_prep: photoPrep,
         pipeline: pipeline || undefined,
@@ -1021,7 +1008,7 @@ function ReprocessModal({ inspectionId, onClose, onStarted }: {
   return (
     <div className="fixed inset-0 z-[100] bg-black/50 flex items-center justify-center" onClick={onClose}>
       <div className="bg-white rounded-xl shadow-2xl w-[420px] p-5" onClick={e => e.stopPropagation()}>
-        <h3 className="text-sm font-semibold text-gray-800 mb-4">Přegenerovat 3D model (AliceVision)</h3>
+        <h3 className="text-sm font-semibold text-gray-800 mb-4">Spustit / obnovit rekonstrukci</h3>
 
         {/* Pipeline template */}
         <label className="block text-xs font-medium text-gray-600 mb-1">Pipeline</label>
@@ -1055,7 +1042,7 @@ function ReprocessModal({ inspectionId, onClose, onStarted }: {
             ['draft', 'Náhled — rychlé (~20 min), hrubší síť, textury 4K/half-res'],
             ['standard', 'Standard — vyvážené (~1 h), 2M bodů, ostré 8K textury'],
             ['high', 'Vysoká — pomalé (hodiny), plná hloubka, 5M bodů, ostré 8K textury'],
-            ['max', 'Maximální přesnost — OpenMVS: fotometricky zpřesněná síť (~2× přesnější), uzavřené díry; nejpomalejší'],
+            ['max', 'Maximální přesnost — OpenMVS: rozlišení geometrie podle počtu a velikosti fotek; textury z plných snímků'],
           ] as const).map(([val, label]) => (
             <label key={val} className="flex items-start gap-2 text-xs text-gray-700 cursor-pointer">
               <input
@@ -1069,6 +1056,14 @@ function ReprocessModal({ inspectionId, onClose, onStarted }: {
             </label>
           ))}
         </div>
+
+        {quality === 'max' && (
+          <label className="flex items-start gap-2 text-xs text-gray-700 mb-2 cursor-pointer">
+            <input type="checkbox" className="mt-0.5" checked={regional} onChange={e => setRegional(e.target.checked)} />
+            <span>Plné rozlišení po částech — postupný výpočet a spojení celého modelu.
+              Zachová detail snímků; u velké sady může trvat několik dní.</span>
+          </label>
+        )}
 
         {quality === 'max' && (
           <label className="flex items-start gap-2 text-xs text-gray-700 mb-2 cursor-pointer">

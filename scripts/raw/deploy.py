@@ -5,7 +5,9 @@ Requires an existing copied venv/node_modules and a built frontend. Existing
 named containers are not removed: use docker restart after editing this branch.
 """
 import os
+import json
 from pathlib import Path
+import shlex
 import subprocess
 
 REPO = Path(__file__).resolve().parents[2]
@@ -26,6 +28,14 @@ def main():
     env = ROOT / 'operations' / 'backend.env'
     if not env.is_file() or not (ROOT / 'state/vista.db').is_file():
         raise SystemExit('Initialize the private environment and database first')
+    values = dict(line.split('=', 1) for line in env.read_text().splitlines()
+                  if line and not line.startswith('#') and '=' in line)
+    sources = list(dict.fromkeys(Path(p).resolve(strict=True) for p in
+                   [values.get('RAW_SOURCE_ROOT', str(SOURCE)),
+                    *json.loads(values.get('RAW_SOURCE_ROOTS', '[]'))] if p))
+    if any(p.is_relative_to(ROOT) or ROOT.is_relative_to(p) for p in sources):
+        raise SystemExit('Read-only datasets must be separate from writable RAW storage')
+    readonly = ' '.join('--readonly ' + shlex.quote(str(p)) for p in [*sources, MESHROOM, REPO])
     if subprocess.run(['/usr/bin/docker', 'network', 'inspect', NETWORK], capture_output=True).returncode:
         run('/usr/bin/docker', 'network', 'create', '--label', 'vista.instance=raw', NETWORK)
 
@@ -36,7 +46,7 @@ Description=Restricted job broker for isolated VISTA RAW
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 {REPO}/scripts/raw/job_broker.py --root {ROOT} --readonly {SOURCE} --readonly {MESHROOM} --readonly {REPO} --socket {ROOT}/state/jobs.sock
+ExecStart=/usr/bin/python3 {REPO}/scripts/raw/job_broker.py --root {ROOT} {readonly} --socket {ROOT}/state/jobs.sock
 Restart=on-failure
 RestartSec=5
 UMask=0077
@@ -58,7 +68,8 @@ WantedBy=default.target
               '-v', f'{REPO}:{REPO}:ro', '-e', 'HOME=/tmp', '-e', 'PYTHONDONTWRITEBYTECODE=1']
     backend = [*common, '--name', 'vista-raw-backend', '--cpus', '4', '--memory', '16g', '--memory-swap', '16g',
                '-p', '127.0.0.1:8001:8001', '--env-file', str(env),
-               '-v', f'{ROOT}:{ROOT}:rw', '-v', f'{SOURCE}:{SOURCE}:ro',
+               '-v', f'{ROOT}:{ROOT}:rw',
+               *[arg for source in sources for arg in ('-v', f'{source}:{source}:ro')],
                '-v', f'{MESHROOM}:{MESHROOM}:ro', '-v', '/tmp/vista-gpu.lock:/tmp/vista-gpu.lock:rw',
                '-w', str(REPO / 'backend'), 'ubuntu:22.04',
                str(REPO / 'backend/.venv/bin/python'), '-m', 'uvicorn', 'app.main:app',

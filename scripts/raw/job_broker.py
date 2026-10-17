@@ -21,10 +21,69 @@ import uuid
 
 DOCKER = '/usr/bin/docker'
 IMAGES = {'vista-meshroom:latest', 'vista-openmvs:2.3-cuda', 'vista-openmvs:2.3',
-          'vista-dsine:latest', 'vista-defects:latest'}
+          'vista-dsine:latest', 'vista-defects:latest', 'ubuntu:22.04'}
 ENV_NAMES = {'HOME', 'LD_LIBRARY_PATH', 'ALICEVISION_ROOT', 'OMP_NUM_THREADS',
              'OPENBLAS_NUM_THREADS', 'MPLCONFIGDIR', 'XDG_CACHE_HOME'}
 _slot = threading.Semaphore(1)
+
+# These are fixed application functions, not arbitrary Python/shell execution.
+PYTHON_STAGES = {
+    'export-colmap': {'sfm', 'work', 'result'},
+    'clean-mesh': {'mesh', 'output', 'result', 'keep_largest'},
+    'texture-ply': {'mesh', 'output', 'result'},
+    'normal-prior': {'mesh', 'output', 'work', 'normals', 'result'},
+    'lods': {'mesh', 'result'},
+    'tiles': {'mesh', 'result'},
+    'quality-report': {'model', 'photos', 'result'},
+    'region-plan': {'sfm', 'work', 'result'},
+    'region-prepare': {'sfm', 'global_work', 'plan', 'work', 'region', 'max_views', 'result'},
+    'region-crop': {'mesh', 'output', 'plan', 'region', 'wide', 'result'},
+    'region-bake': {'work', 'mesh', 'output', 'plan', 'region', 'result'},
+    'region-merge': {'plan', 'output', 'result'},
+    'region-tiles': {'plan', 'output', 'result'},
+}
+
+
+def python_command(stage, payload, root, readonly, uid, pinned):
+    if stage not in PYTHON_STAGES or not isinstance(payload, dict) or set(payload) != PYTHON_STAGES[stage]:
+        raise ValueError('Invalid Python stage or arguments')
+    for key, value in payload.items():
+        if key in {'keep_largest', 'wide'}:
+            if not isinstance(value, bool):
+                raise ValueError('Expected boolean')
+            continue
+        if key in {'region', 'max_views'}:
+            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 256:
+                raise ValueError('Invalid region parameter')
+            continue
+        if not isinstance(value, str) or not Path(value).is_absolute() or not under(Path(value).resolve(), root):
+            raise ValueError('Python stage paths must stay inside RAW storage')
+    repo = Path(__file__).resolve().parents[2]
+    if repo not in readonly:
+        raise ValueError('RAW repository is not an approved read-only root')
+    name = 'vista-raw-job-' + uuid.uuid4().hex[:16]
+    mounts = [root, *readonly, Path('/usr'), Path('/lib'), Path('/lib64'),
+              Path('/etc/ssl/certs'), Path('/etc/fonts')]
+    env = {'ISOLATED_DATA_ROOT': str(root), 'UPLOAD_DIR': str(root / 'uploads'),
+           'WORK_DIR': str(root / 'scratch'), 'DATABASE_URL': f'sqlite+aiosqlite:///{root}/state/vista.db',
+           'RAW_SOURCE_ROOTS': json.dumps([str(p) for p in readonly if p != repo]),
+           'GLTFPACK_PATH': str(root / 'tools/gltfpack/gltfpack'), 'HOME': '/tmp',
+           'PYTHONDONTWRITEBYTECODE': '1', 'VISTA_OPENMVS_IMAGE': 'vista-openmvs:2.3-cuda'}
+    command = bounded_command(name, uid) + [
+        *[a for p in mounts for a in ('-v', f'{p}:{p}:' + ('rw' if p == root else 'ro'))],
+        *[a for k, v in env.items() for a in ('-e', f'{k}={v}')],
+        '-w', str(repo / 'backend'), pinned['ubuntu:22.04'], str(repo / 'backend/.venv/bin/python'),
+        '-m', 'app.services.photogrammetry.worker', stage, json.dumps(payload)]
+    return command, name
+
+
+def bounded_command(name, uid):
+    return [DOCKER, 'run', '--name', name, '--label', 'vista.instance=raw',
+            '--read-only', '--network', 'none', '--cap-drop', 'ALL',
+            '--security-opt', 'no-new-privileges', '--user', uid,
+            '--cpus', '8', '--memory', '24g', '--memory-swap', '24g', '--pids-limit', '512',
+            '--tmpfs', '/tmp:rw,size=4g,mode=1777',
+            '-e', 'OMP_NUM_THREADS=8', '-e', 'OPENBLAS_NUM_THREADS=4']
 
 
 def under(path: Path, root: Path) -> bool:
@@ -35,6 +94,8 @@ def validate(argv: list[str], root: Path, readonly: list[Path], uid: str,
              pinned: dict[str, str]) -> tuple[list[str], str | None]:
     if not isinstance(argv, list) or not all(isinstance(x, str) for x in argv):
         raise ValueError('Expected argument array')
+    if len(argv) == 3 and argv[0] == 'python-stage':
+        return python_command(argv[1], json.loads(argv[2]), root, readonly, uid, pinned)
     if len(argv) == 3 and argv[:2] == ['image', 'inspect'] and argv[2] in pinned:
         return [DOCKER, 'image', 'inspect', pinned[argv[2]]], None
     if not argv or argv[0] != 'run':
@@ -65,7 +126,11 @@ def validate(argv: list[str], root: Path, readonly: list[Path], uid: str,
                 raise ValueError('Forbidden mount mode')
             if not under(real, root) and not (mode == 'ro' and any(under(real, p) for p in readonly)):
                 raise ValueError('Mount escapes RAW storage or read-only sources')
+            av_shim = (mode == 'ro' and dst.parent == Path('/meshroom/aliceVision/bin')
+                       and dst.name.startswith('aliceVision_')
+                       and real == Path(__file__).resolve().with_name('alicevision-bounded'))
             if not (under(dst, root) or str(dst) in {'/meshroom', '/in', '/out', '/defects', '/masks', '/tmp/MeshroomCache'}
+                    or (mode == 'ro' and str(dst) == '/meshroom-native') or av_shim
                     or (mode == 'ro' and any(under(dst, p) for p in readonly))):
                 raise ValueError('Forbidden mount destination')
             passed += ['-v', f'{real}:{dst}:{mode}']
@@ -84,16 +149,12 @@ def validate(argv: list[str], root: Path, readonly: list[Path], uid: str,
             if not Path(value).is_absolute() or not under(Path(value).resolve(), root):
                 raise ValueError('Working directory must be inside RAW storage')
             passed += ['-w', value]
-    if i >= len(argv) or argv[i] not in pinned:
+    if i < len(argv) and argv[i] in {'vista-dsine', 'vista-defects'}:
+        argv = [*argv[:i], argv[i] + ':latest', *argv[i + 1:]]
+    if i >= len(argv) or argv[i] not in pinned or argv[i] == 'ubuntu:22.04':
         raise ValueError('Image is not in the installed allowlist')
     name = 'vista-raw-job-' + uuid.uuid4().hex[:16]
-    command = [DOCKER, 'run', '--rm', '--name', name, '--label', 'vista.instance=raw',
-               '--read-only', '--network', 'none', '--cap-drop', 'ALL',
-               '--security-opt', 'no-new-privileges', '--user', uid,
-               '--cpus', '8', '--memory', '24g', '--memory-swap', '24g', '--pids-limit', '512',
-               '--tmpfs', '/tmp:rw,size=4g,mode=1777',
-               '-e', 'OMP_NUM_THREADS=8', '-e', 'OPENBLAS_NUM_THREADS=4',
-               *passed, pinned[argv[i]], *argv[i + 1:]]
+    command = bounded_command(name, uid) + [*passed, pinned[argv[i]], *argv[i + 1:]]
     return command, name
 
 
@@ -133,7 +194,14 @@ class Handler(socketserver.StreamRequestHandler):
                 tail = proc.stdout.read()
                 if tail:
                     self.send({'data': base64.b64encode(tail).decode()})
-                self.send({'exit': proc.returncode})
+                rc = proc.returncode
+                if name:
+                    state = subprocess.run([DOCKER, 'inspect', '--format', '{{json .State}}', name],
+                                           capture_output=True, text=True, timeout=10)
+                    if state.returncode == 0 and json.loads(state.stdout).get('OOMKilled'):
+                        self.send({'data': base64.b64encode(b'RAW worker exceeded its 24 GiB RAM limit (OOM). Completed stages retained.\n').decode()})
+                        rc = 137
+                self.send({'exit': rc})
                 print(json.dumps({'event': 'exit', 'name': name, 'code': proc.returncode}), flush=True)
         except Exception as exc:
             if name:
@@ -147,6 +215,10 @@ class Handler(socketserver.StreamRequestHandler):
             except (BrokenPipeError, ConnectionError):
                 pass
             print(json.dumps({'event': 'error', 'name': name, 'error': str(exc)}), flush=True)
+        finally:
+            if name:
+                subprocess.run([DOCKER, 'rm', '-f', name], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=20)
 
 
 def main():

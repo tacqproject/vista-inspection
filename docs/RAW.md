@@ -13,6 +13,16 @@
 | Pracovní data, náhledy | `/media/epr/ssd/vista-raw/scratch` |
 | Konfigurace a provozní záznamy | `/media/epr/ssd/vista-raw/operations` |
 | Sdílené originály, jen čtení | `/media/epr/ssd/vista-work/datasets/corvallis-bridge/VLABDW/photos` |
+| DNG EPR z 16. 10. 2026, jen čtení | `/var/tmp/sfm_epr_photos/DNG` na interním NVMe |
+
+Další zdrojové složky nastavuje `RAW_SOURCE_ROOTS` jako JSON pole cest
+v soukromém `operations/backend.env`. Původní `RAW_SOURCE_ROOT` zůstává
+podporovaný. Každý zdroj se připojuje jen pro čtení do API i výpočetních
+kontejnerů a je explicitně povolený brokerem. Po změně seznamu je nutné
+při nečinných úlohách znovu vytvořit pouze RAW backend s novými mounty
+a restartovat RAW broker. Lokální import vytváří odkazy, nikoli další kopie.
+Umístění pod `/var/tmp` je dočasné; přesun datasetu později vyžaduje také
+aktualizaci mountů a odkazů v inspekci.
 
 Přihlašovací účty byly při založení zkopírovány do nové databáze. Uživatel
 se přihlásí stejným jménem a heslem; pozdější změny účtů se mezi instancemi
@@ -72,6 +82,13 @@ k produkčním adresářům, privilegované režimy, hostitelskou síť, build a
 cizích kontejnerů. Obrazy původní VISTA se nepřestavují ani nepřeznačují.
 
 Výpočetní úloha má 8 CPU, 24 GiB RAM bez dalšího swapu a běží po jedné.
+Extrakce příznaků má navíc explicitně `FeatureExtraction:maxThreads=8` ve všech
+režimech kvality. Samotné `OMP_NUM_THREADS` nestačí: AliceVision v automatickém
+režimu detekuje paměť a procesory hostitele a na 798 DNG spustil 28 vláken,
+čímž překročil limit kontejneru. Limit vláken nemění rozlišení ani kvalitu příznaků.
+Průběh Meshroomu se čte ze stavů dávek aktuálního grafu; výpis grafu a varování
+o nespouštěných uzlech se za dokončené kroky nepovažují. Procenta jsou orientační
+podíl etap, nikoli odhad zbývajícího času.
 Backend má 4 CPU / 16 GiB, web 1 CPU / 512 MiB. GPU operace spolupracují
 se stávajícím `/tmp/vista-gpu.lock`. Sdílí se fyzický počítač a GPU;
 výkonnostní konkurence tedy zůstává možná, zvláště pokud jiný program zámek
@@ -142,7 +159,8 @@ Rekonstrukce testovací sady v režimu Maximální přesnost byla dokončena vč
 textur, tří LOD úrovní a 41 streamovaných dlaždic. Test využil obnovení od
 texturování po opravě výše popsaného pádu OBJ; SfM ani hustá rekonstrukce se
 neopakovaly. Výsledný model a pozice kamer se otevřely v prohlížeči bez chyb
-JavaScriptu a HTTP. Celá sada 798 DNG zůstává ve stavu připraveno.
+JavaScriptu a HTTP. V době tohoto prvního ověření (16. 10.) byla celá sada
+798 DNG ještě připravena ke spuštění.
 
 Report kvality vytváří náhledy přes Mesa na CPU v režimu bez displeje
 (`EGL_PLATFORM=surfaceless`), aby nepotřeboval GPU uvnitř API kontejneru;
@@ -152,3 +170,67 @@ Byl ověřen report se třemi pohledy porovnanými se zdrojovými DNG.
 Výsledky praktického ověření, checksumy původní instalace a manifest importu
 jsou v soukromém `operations/`. Fotografie, modely, náhledy, databáze a logy
 se do repozitáře neukládají.
+
+## Obnovení a plné rozlišení po částech (17. 10. 2026)
+
+Pád velkého Corvallisu byl OOM v limitu 24 GiB během barvení řídkého SfM
+mračna. `StructureFromMotion:computeStructureColor=False` vynechává tento
+zbytečný krok; textury modelu vznikají později ze snímků. Obal vybraných
+AliceVision binárek přidává `--maxCoresAvailable=8` a paměťovou nápovědu
+20 GiB. Obal se připojuje pouze uvnitř RAW workeru; společná instalace
+Meshroomu se nemění. Ověření nového grafu 798 snímků zachovalo UID všech
+čtyř předchozích etap, tedy i hotové příznaky a párování.
+
+SfM JSON se čte průběžně pomocí ijson. COLMAP export ukládá pozorování na SSD,
+nikoli všechna do RAM. Jeden RAW dekodér a záznamy dokončených obrázků umožní
+pokračovat po přerušení. Python kroky s nativními knihovnami běží přes broker
+v samostatném kontejneru s limitem 24 GiB, stejně jako OpenMVS. OOM tedy
+nemusí ukončit API proces. Záznam úspěšného kroku obsahuje identitu vstupů,
+parametry a identity všech požadovaných výstupů. SfM se vybírá podle aktuálního
+grafu, nikoli podle času souboru. Úspěšná cache se automaticky nemaže.
+
+Volba **Plné rozlišení po částech** (`quality=max`, `regional=true`) používá
+stejný postup zpracování povrchu jako původní publikované v2: prostorové
+části, OpenMVS na úrovni 0, fotometrické zpřesnění, DSINE + stejný preset
+`normal_prior.PRESET`, ořez společných hranic a `hires_texture.bake` s výřezy
+fotografií 1:1. Části zůstávají ve společném SfM souřadném systému. Nakonec
+vzniknou jeden model, tři glTF úrovně a dlaždice sestavené po částech.
+
+Počet částí se odvozuje z konkrétního SfM, nikoli z původního mostu. Výpočet
+pracuje nejvýše s 32 kamerami na část (při nedostatku prostředků 24, pak 16),
+čtyřmi sousedními pohledy pro zpřesnění a přibližným rozpočtem šesti milionů
+bodů při síťování. Hloubkové mapy mají úroveň 0 a strop 8192 px: všechny
+Corvallis DNG 5472 × 3648 se vejdou bez zmenšení. To zachovává pixelové
+rozlišení, **není to záruka stejné geometrické kvality u jinak nafoceného mostu**.
+AI chyby v tomto režimu zastaví běh; nezveřejní se tiše model bez vyhlazení.
+
+Každá část má samostatné kontrolní záznamy, logy a statistiky. Po úspěšném
+uložení její sítě a textur se odstraní pouze znovuvytvořitelné husté
+mezivýsledky této nové RAW úlohy. SfM, zdrojové snímky, zpřesněné a AI sítě,
+finální části a textury zůstávají. Původní `vista-work/hires`, původní
+inspekce a jejich výpočty se tohoto úklidu nikdy neúčastní.
+
+Bez této volby je dostupný úspornější globální režim: rozlišení hustých map
+a zpřesnění se odvozuje z celkového rozpočtu 300 milionů pixelů. Pro 798
+Corvallis snímků jde o úroveň 3. Tento režim není náhradou plného rozlišení
+po částech.
+
+`scripts/raw/watch_reconstruction.py` je trvalý dohled nad jednou explicitně
+zvolenou inspekcí. Ukládá stav, disk, CPU/RAM a GPU každých přibližně 45 sekund.
+Za zaseknutí nepovažuje samotné neměnné procento průběhu. Po 45 minutách
+bez CPU, GPU, I/O a logové aktivity může zastavit pouze odpovídající RAW
+worker. Přerušený běh lze automaticky obnovit nejvýše dvakrát se stejnými
+parametry. Neznámá chyba se zaznamená k diagnóze; dohled sám nemění kód ani
+nemaže data. Výpočet po částech má navíc vlastní omezené paměťové pokusy.
+
+Praktická zkouška 17. 10. na šesti sousedních Corvallis DNG prošla celým
+řetězcem: plné hloubkové mapy na GPU, síťování a zpřesnění na úrovni 0,
+DSINE 1344, AI vyhlazení, foto-textury, tři glTF úrovně a 51 webových dlaždic.
+Vzniklo 1 011 783 trojúhelníků; AI pokrylo 91,1 % ploch a textury 95,3 %.
+Samostatné ověření 20 snímků potvrdilo export i obnovu bez opětovného RAW
+dekódování. Jde o ověření mechanismu, nikoli již hotový výsledek celé sady.
+
+DSINE worker spouští pouze v RAW instanci obal `dsine_offline.py`: vypíná
+nadbytečné stahování ImageNet inicializace, protože následné striktní načtení
+kompletního uloženého DSINE checkpointu obnoví všechny váhy enkodéru i dekodéru.
+Sdílený Docker image ani výsledné naučené váhy se tím nemění.

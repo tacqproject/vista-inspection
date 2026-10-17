@@ -16,15 +16,15 @@ log = logging.getLogger(__name__)
 async def run(ctx: ReconstructionContext) -> None:
     if not ctx.obj_file:
         return
+    if ctx.params.get('_regional_plan'):
+        return  # per-region bake/coverage reports accompany the full-resolution model
     from app.services import tiles
     await ctx.report(99, "Vyhodnocení kvality modelu…")
     model_dir = ctx.obj_file.parent
     try:
-        with open(model_dir / "quality_report.log", "w") as fh:
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "app.services.quality_report", str(model_dir), str(ctx.photos_dir),
-                cwd=tiles.BACKEND_DIR, stdout=fh, stderr=asyncio.subprocess.STDOUT)
-            if await proc.wait() != 0:
-                log.warning("quality report failed, see %s", model_dir / "quality_report.log")
+        from ..runtime import run_python_stage
+        await asyncio.to_thread(run_python_stage, 'quality-report', {
+            'model': str(model_dir), 'photos': str(ctx.photos_dir),
+            'result': str(ctx.models_dir / 'quality-result.json')}, model_dir / 'quality_report.log')
     except Exception as e:  # noqa: BLE001
         log.warning("quality report could not run: %s", e)

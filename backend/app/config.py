@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     upload_dir: str = "./raw-data/uploads"
     cors_origins: str = "http://localhost:5174"
     raw_source_root: str = ""
+    raw_source_roots: list[str] = []  # additional read-only datasets, JSON array in env
     auto_reconstruct: bool = False
     disk_reserve_gb: float = 10.0
     max_upload_size_mb: int = 2048
@@ -39,11 +40,15 @@ class Settings(BaseSettings):
         for value in (self.upload_dir, self.work_dir, self.database_url[len(prefix):]):
             if not value or not Path(value).resolve().is_relative_to(root):
                 raise ValueError("Database, uploads and scratch must be inside isolated_data_root")
-        if self.raw_source_root:
-            source = Path(self.raw_source_root).resolve()
+        for source in self.raw_source_paths:
             if source.is_relative_to(root) or root.is_relative_to(source):
                 raise ValueError("Read-only RAW source and writable data root must be separate")
         return self
+
+    @property
+    def raw_source_paths(self) -> list[Path]:
+        return list(dict.fromkeys(Path(p).resolve() for p in
+                                  [self.raw_source_root, *self.raw_source_roots] if p))
 
     # Auth. jwt_secret MUST be set via env in any real deployment; the default
     # is a dev-only fallback (a warning is logged on startup when it's used).

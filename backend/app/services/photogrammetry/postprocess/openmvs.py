@@ -26,8 +26,11 @@ from pathlib import Path
 
 from app.config import settings
 from ..base import ReconstructionContext, postprocess_step
+from ..runtime import (Checkpoints, identity, fingerprint, current_sfm, run_python_stage,
+                       sfm_header, require_space, atomic_json)
 
 CONTAINER_CACHE = "/tmp/MeshroomCache"
+EMPTY_COLOR = 0x808080
 
 
 def uses_openmvs(params: dict) -> bool:
@@ -35,23 +38,28 @@ def uses_openmvs(params: dict) -> bool:
 
 
 async def _export_sfm_json(cache_dir: Path, log: Path) -> Path:
-    """Newest SfM of the cache → sfm.json with landmarks + observations."""
-    sfm_files = sorted(cache_dir.glob("StructureFromMotion/*/sfm.abc"),
-                       key=lambda p: p.stat().st_mtime, reverse=True)
-    if not sfm_files:
-        raise RuntimeError("SfM výstup nenalezen — rekonstrukce pozic kamer selhala.")
-    rel = sfm_files[0].relative_to(cache_dir)
-    out = cache_dir / "sfm.json"
-    env = {**os.environ, "VISTA_MESHROOM_CACHE": str(cache_dir),
-           "VISTA_MESHROOM_BIN": "aliceVision_convertSfMFormat"}
-    with open(log, "a") as fh:
+    """Export the graph's completed SfM once; never pick another run's frame."""
+    folder = current_sfm(cache_dir)
+    inputs = identity(folder / 'sfm.abc')
+    cp = Checkpoints(cache_dir / 'exports')
+    out = cache_dir / 'sfm.json'
+    if cp.valid('sfm-json', inputs):
+        return out
+    temp = cache_dir / 'sfm-pending.json'
+    temp.unlink(missing_ok=True)
+    rel = (folder / 'sfm.abc').relative_to(cache_dir)
+    env = {**os.environ, 'VISTA_MESHROOM_CACHE': str(cache_dir),
+           'VISTA_MESHROOM_BIN': 'aliceVision_convertSfMFormat'}
+    with open(log, 'a') as fh:
         proc = await asyncio.create_subprocess_exec(
-            settings.meshroom_path, "--input", f"{CONTAINER_CACHE}/{rel}",
-            "--output", f"{CONTAINER_CACHE}/sfm.json", "--describerTypes", "dspsift",
+            settings.meshroom_path, '--input', f'{CONTAINER_CACHE}/{rel}',
+            '--output', f'{CONTAINER_CACHE}/{temp.name}', '--describerTypes', 'dspsift',
             env=env, stdout=fh, stderr=asyncio.subprocess.STDOUT)
-        await proc.wait()
-    if not out.exists():
-        raise RuntimeError("Export SfM (sfm.json) selhal.")
+        rc = await proc.wait()
+    if rc or not temp.is_file() or temp.stat().st_size == 0:
+        raise RuntimeError(f'Export SfM selhal (kód {rc}). Detaily: {log}')
+    temp.replace(out)
+    cp.save('sfm-json', inputs, [out])
     return out
 
 
@@ -94,24 +102,21 @@ async def _ai_denoise(ctx: ReconstructionContext, work: Path, mesh: Path, log: P
     edges and cracks the network sees stay sharp. Best effort: on any failure
     the photometrically refined mesh is used as is."""
     from app.services.photogrammetry import openmvs_bridge as O
-    import sys
-    await ctx.report(80, "AI: odhad normál povrchu z fotek (DSINE)…")
+    await ctx.report(80, 'AI: odhad normál povrchu z fotek (DSINE)…')
     try:
-        with open(log, "a") as fh:
-            await asyncio.to_thread(O.predict_normals, work, work / "normals", 1344, fh)
-            await ctx.report(83, "AI: odšumění povrchu podle normál…")
-            out = work / "mesh_ai.ply"
-            # own process: the mesh + sparse operators need several GB of RAM
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "app.services.normal_prior", str(mesh), str(out),
-                str(work), str(work / "normals"),
-                cwd=str(Path(__file__).resolve().parents[4]), stdout=fh, stderr=asyncio.subprocess.STDOUT)
-            if await proc.wait() != 0 or not out.exists():
-                raise RuntimeError(f"normal_prior rc={proc.returncode}")
+        with open(log, 'a') as fh:
+            await asyncio.to_thread(O.predict_normals, work, work / 'normals', 1344, fh)
+        await ctx.report(83, 'AI: odšumění povrchu podle normál…')
+        out = work / 'mesh_ai.ply'
+        await asyncio.to_thread(run_python_stage, 'normal-prior', {
+            'mesh': str(mesh), 'output': str(out), 'work': str(work),
+            'normals': str(work / 'normals'), 'result': str(work / 'normal-result.json')}, log)
         return out
-    except Exception as e:  # noqa: BLE001
-        with open(log, "a") as fh:
-            fh.write(f"\nAI odšumění přeskočeno: {e}\n")
+    except Exception as exc:
+        with open(log, 'a') as fh:
+            fh.write(f'\nAI odšumění přeskočeno: {exc}\n')
+        atomic_json(work / 'ai-warning.json', {'warning': str(exc)})
+        await ctx.report(84, 'AI odšumění selhalo; pokračuji s fotometricky zpřesněným modelem.')
         return mesh
 
 
@@ -122,17 +127,26 @@ async def _ai_denoise(ctx: ReconstructionContext, work: Path, mesh: Path, log: P
 DENSE_PX_BUDGET = 300e6  # isolated workers have a 24 GiB RAM cap
 
 
+def dense_pixels(dimensions, level):
+    # OpenMVS scales the larger dimension, clamped by min/max resolution.
+    total = 0
+    for w, h in dimensions:
+        side = min(max(w, h), max(640, min(2560, max(w, h) / 2 ** level)))
+        total += w * h * (side / max(w, h)) ** 2
+    return total
+
+
 def _dense_level(work: Path, n_views: int) -> int:
     from PIL import Image
-    img = next((p for p in (work / "images").iterdir()), None)
-    if img is None or n_views == 0:
-        return 1
-    with Image.open(img) as image:
-        w, h = image.size
-    px = h * w
+    dimensions = []
+    for p in (work / 'images').iterdir():
+        with Image.open(p) as im:
+            dimensions.append(im.size)
     level = 1
-    while n_views * px / 4 ** level > DENSE_PX_BUDGET and level < 3:
+    while dense_pixels(dimensions, level) > DENSE_PX_BUDGET and level < 6:
         level += 1
+    if dense_pixels(dimensions, level) > DENSE_PX_BUDGET:
+        raise RuntimeError('Scéna přesahuje paměťový rozpočet i při minimálním rozlišení map; je nutné ji rozdělit.')
     return level
 
 
@@ -141,54 +155,67 @@ async def run(ctx: ReconstructionContext) -> None:
     if not uses_openmvs(ctx.params):
         return
     from app.services.photogrammetry import openmvs_bridge as O
-    from .refine import _clean_mesh
-
-    cache_dir = ctx.models_dir / "meshroom_cache"
-    out_dir = ctx.models_dir / "meshroom_out"
+    cache_dir = ctx.models_dir / 'meshroom_cache'
+    out_dir = ctx.models_dir / 'meshroom_out'
     out_dir.mkdir(exist_ok=True)
-    # depth maps need tens of GB → big scratch disk when configured
-    work = (Path(settings.work_dir) / ctx.inspection_id / "openmvs") if settings.work_dir \
-        else ctx.models_dir / "openmvs"
-    shutil.rmtree(work, ignore_errors=True)
-    work.mkdir(parents=True)
-    log = ctx.models_dir / "openmvs.log"
-
-    await ctx.report(58, "Příprava scény pro OpenMVS (odstranění zkreslení snímků)…")
+    log = ctx.models_dir / 'openmvs.log'
+    await ctx.report(58, 'Export SfM; hotové kroky se při opakování použijí znovu…')
     sfm_json = await _export_sfm_json(cache_dir, log)
-    exp = await asyncio.to_thread(O.export_colmap, sfm_json, work)
-
-    await ctx.report(62, "OpenMVS: hustá rekonstrukce, síť a fotometrické zpřesnění…")
-    dense_level = _dense_level(work, int(exp.get("views", 0)))
-    if dense_level > 1:
-        await ctx.report(62, f"OpenMVS: {exp.get('views')} fotek — hloubkové mapy ve sníženém rozlišení "
-                             f"(úroveň {dense_level}) kvůli paměti; zpřesnění sítě v plném…")
+    # A changed SfM frame gets a separate work directory. Retrying the same
+    # frame retains undistorted images, maps, meshes and their checkpoints.
+    signature = fingerprint(identity(sfm_json))[:16]
+    base = Path(settings.work_dir) / ctx.inspection_id if settings.work_dir else ctx.models_dir
+    work = base / 'openmvs' / signature
+    work.mkdir(parents=True, exist_ok=True)
+    atomic_json(ctx.models_dir / 'openmvs-work.json', {'work': str(work)})
+    exp = await asyncio.to_thread(run_python_stage, 'export-colmap', {
+        'sfm': str(sfm_json), 'work': str(work), 'result': str(work / 'export-result.json')}, log)
+    if ctx.params.get('regional'):
+        from ..regional import run_regions
+        await run_regions(ctx, sfm_json, work, out_dir)
+        return
+    dense_level = _dense_level(work, int(exp['views']))
+    atomic_json(ctx.models_dir / 'resource-plan.json', {
+        'registered_views': exp['views'], 'dense_level': dense_level,
+        'depth_pixels': int(dense_pixels(exp['dimensions'], dense_level)),
+        'worker_ram_gib': 24, 'threads': 8, 'disk_reserve_gb': settings.disk_reserve_gb,
+        'refine_level': dense_level, 'work': str(work)})
+    await ctx.report(62, f"OpenMVS: {exp['views']} kamer, hloubkové mapy a zpřesnění na úrovni {dense_level}; textury z plných snímků…")
     refined = await asyncio.to_thread(O.run_openmvs, work, dense_level, True, 30, False,
-                                      False, 3, 1)       # refine at level 1 regardless
-
-    if ctx.params.get("ai_normals", True):
+                                      False, 3, dense_level)
+    if ctx.params.get('ai_normals', False):
         refined = await _ai_denoise(ctx, work, refined, log)
-
-    await ctx.report(86, "Uzavírání děr sítě (PyMeshLab)…")
-    closed = work / "mesh_closed.ply"
-    stats = await asyncio.to_thread(
-        _clean_mesh, str(refined), str(closed), None, False,
-        bool(ctx.params.get("keep_largest_mesh", True)),
-    )
-    (out_dir / "refine_stats.txt").write_text(str(stats))
+    await ctx.report(86, 'Čištění sítě v samostatném paměťově omezeném procesu…')
+    closed = work / 'mesh_closed.ply'
+    cp = Checkpoints(work / 'postprocess')
+    clean_inputs = [identity(refined), bool(ctx.params.get('keep_largest_mesh', True))]
+    if not cp.valid('clean', clean_inputs):
+        stats = await asyncio.to_thread(run_python_stage, 'clean-mesh', {
+            'mesh': str(refined), 'output': str(closed), 'keep_largest': clean_inputs[1],
+            'result': str(work / 'clean-result.json')}, log)
+        (out_dir / 'refine_stats.txt').write_text(str(stats))
+        cp.save('clean', clean_inputs, [closed])
     await finish_texturing(ctx, work, out_dir)
 
 
 async def finish_texturing(ctx: ReconstructionContext, work: Path, out_dir: Path) -> None:
-    """Final stage can also resume a saved mesh after an exporter failure."""
     from app.services.photogrammetry import openmvs_bridge as O
-    await ctx.report(92, "OpenMVS: texturování…")
-    with open(work / "openmvs.log", "a") as lf:
-        textured = await asyncio.to_thread(O.texture_mesh, work.resolve(),
-                                           "scene_dense.mvs", "mesh_closed.ply", lf)
-
-    for old in out_dir.glob("texture*"):          # stale textures of a previous run
-        old.unlink(missing_ok=True)
+    await ctx.report(92, 'OpenMVS: texturování…')
+    cp = Checkpoints(work / 'postprocess')
+    inputs = [identity(work / 'scene_dense.mvs'), identity(work / 'mesh_closed.ply'), O.OPENMVS_IMAGE]
+    textured = work / 'textured.obj'
+    if not cp.valid('texture', inputs):
+        with open(work / 'openmvs.log', 'a') as lf:
+            textured = await asyncio.to_thread(O.texture_mesh, work.resolve(),
+                                               'scene_dense.mvs', 'mesh_closed.ply', lf)
+        # Include every referenced texture so incomplete exports cannot resume.
+        material = textured.with_suffix('.mtl')
+        outputs = [textured, material]
+        for line in material.read_text().splitlines():
+            if line.strip().startswith('map_Kd '):
+                outputs.append(work / line.strip().split(None, 1)[1])
+        cp.save('texture', inputs, outputs)
     ctx.obj_file = await asyncio.to_thread(_to_app_frame, textured, out_dir)
-    ctx.result.update({"model_path": ctx.obj_file, "engine_used": "meshroom+openmvs"})
-    shutil.move(str(work / "openmvs.log"), str(ctx.models_dir / "openmvs_tools.log"))  # may cross disks
-    shutil.rmtree(work, ignore_errors=True)       # depth maps + dense cloud: GBs
+    ctx.result.update({'model_path': ctx.obj_file, 'engine_used': 'meshroom+openmvs'})
+    shutil.copy2(work / 'openmvs.log', ctx.models_dir / 'openmvs_tools.log')
+    # Retain all successful stages until the user explicitly cleans them up.

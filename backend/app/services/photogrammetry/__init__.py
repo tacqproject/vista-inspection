@@ -43,7 +43,7 @@ async def _prepare_photos(ctx: ReconstructionContext) -> None:
         logging.getLogger(__name__).warning("photo prep failed, using originals: %s", e)
 
 
-async def run_reconstruction(
+async def _run_reconstruction_locked(
     inspection_id: str,
     on_progress: ProgressCallback | None = None,
     params: dict | None = None,
@@ -91,6 +91,25 @@ async def run_reconstruction(
         val = out.get(key)
         out[key] = get_relative_path(Path(val)) if val else None
     return out
+
+
+async def run_reconstruction(inspection_id, on_progress=None, params=None):
+    """The RAW pipeline owns one lock across all stages, including recovery."""
+    import fcntl
+    from app.config import settings
+    from .runtime import atomic_json
+    root = Path(settings.isolated_data_root)
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / 'reconstruction.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError('V RAW instanci už běží jiná rekonstrukce.')
+        atomic_json(get_models_dir(inspection_id) / 'run-parameters.json', params or {})
+        try:
+            return await _run_reconstruction_locked(inspection_id, on_progress, params)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 async def check_engine_availability() -> dict:

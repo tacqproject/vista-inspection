@@ -62,8 +62,13 @@ def hole_stats(m) -> dict:
 def landmark_accuracy(m, sfm_json: Path, sample: int = 20000) -> dict:
     """Distance of SfM landmarks to the mesh (landmarks: SfM frame → mesh frame)."""
     from app.services.sfm import mesh_to_sfm
-    data = json.loads(Path(sfm_json).read_text())
-    pts = np.array([[float(v) for v in L["X"]] for L in data.get("structure", [])], float)
+    # Keep only coordinates, not millions of observation dictionaries.
+    from array import array
+    from app.services.photogrammetry.runtime import sfm_items
+    coords = array('d')
+    for landmark in sfm_items(Path(sfm_json), 'structure'):
+        coords.extend(float(v) for v in landmark['X'])
+    pts = np.frombuffer(coords, dtype=np.float64).reshape(-1, 3)
     if not len(pts):
         return {}
     diag = float(np.linalg.norm(m.bounds[1] - m.bounds[0]))
@@ -90,7 +95,9 @@ def landmark_accuracy(m, sfm_json: Path, sample: int = 20000) -> dict:
 def reprojection_rms(sfm_json: Path) -> dict:
     """RMS reprojection error of the SfM (px) — bundle-adjustment quality."""
     from app.services import sfm as S
-    data = json.loads(Path(sfm_json).read_text())
+    from app.services.photogrammetry.runtime import sfm_header, sfm_items
+    from itertools import islice
+    data = sfm_header(Path(sfm_json))
     # cameras by viewId
     intr = {i["intrinsicId"]: i for i in data.get("intrinsics", [])}
     poses = {p["poseId"]: p["pose"]["transform"] for p in data.get("poses", [])}
@@ -114,7 +121,7 @@ def reprojection_rms(sfm_json: Path) -> dict:
                                      [float(x) for x in pose["center"]], fx, fy,
                                      float(pp[0]), float(pp[1]), tuple(dp[:3]))
     errs = []
-    for L in data.get("structure", [])[:40000]:
+    for L in islice(sfm_items(Path(sfm_json), 'structure'), 40000):
         X = [float(v) for v in L["X"]]
         for ob in L.get("observations", []):
             cam = cams.get(ob.get("observationId"))

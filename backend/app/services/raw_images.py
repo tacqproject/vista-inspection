@@ -40,9 +40,7 @@ def source_photo(inspection_id: str, filename: str) -> Path:
     base = get_photos_dir(inspection_id).resolve()
     source = base / filename
     target = source.resolve()
-    roots = [base]
-    if settings.raw_source_root:
-        roots.append(Path(settings.raw_source_root).resolve())
+    roots = [base, *settings.raw_source_paths]
     if not any(target.is_relative_to(root) for root in roots):
         raise ValueError("Photo escapes permitted source directories")
     if not source.is_file() or source.suffix.lower() not in ALLOWED_IMAGE_EXTENSIONS:

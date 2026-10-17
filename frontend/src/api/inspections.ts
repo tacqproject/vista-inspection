@@ -123,6 +123,7 @@ export const uploadsApi = {
     refine_faces?: number
     pipeline?: string          // filename of an imported Meshroom .mg template
     web_postprocess?: boolean  // textures/LODs/mobile variant chain
+    regional?: boolean
     ai_normals?: boolean       // max: AI (DSINE) normal-guided denoising
     ai_defects?: boolean       // AI defect detection on photos → annotations
     photo_prep?: boolean       // exposure balance, shadow lift, cull blurred/duplicates
