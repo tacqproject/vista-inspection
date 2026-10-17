@@ -12,6 +12,29 @@ from app.services.photogrammetry.postprocess.openmvs import dense_pixels
 
 
 class ResumeTests(unittest.TestCase):
+    def test_reliable_region_points_require_distinct_views(self):
+        from app.services.photogrammetry.regional import make_plan, write_region_scene
+        with tempfile.TemporaryDirectory() as temp, patch.object(settings, 'disk_reserve_gb', 0):
+            root = Path(temp)
+            header = {'views': [{'viewId': str(i), 'poseId': str(i)} for i in range(3)],
+                      'poses': [{'poseId': str(i)} for i in range(3)], 'intrinsics': []}
+            good = [{'X': [i / 120, 0, 0], 'observations': [
+                {'observationId': str(v)} for v in range(3)]} for i in range(120)]
+            repeated = [{'X': [i / 120, 0, 0], 'observations': [
+                {'observationId': '0'}, {'observationId': '0'}, {'observationId': '1'}]}
+                for i in range(120)]
+            sfm = root / 'sfm.json'
+            sfm.write_text(json.dumps({**header, 'structure': good + repeated}))
+            plan = make_plan(sfm, root / 'regions')
+            self.assertEqual(plan['reliable_points'], 120)
+            self.assertEqual(plan['source_reliable_points'], 120)
+            landmarks = root / 'regions/C000/landmarks.jsonl'
+            # Context preserves all source observations, while a region with
+            # only one selected view cannot triangulate duplicate features.
+            self.assertEqual(len(landmarks.read_text().splitlines()), 240)
+            self.assertEqual(write_region_scene(root/'single.json', header, landmarks, {'0'}), 0)
+            self.assertEqual(write_region_scene(root/'pair.json', header, landmarks, {'0', '1'}), 240)
+
     def test_reviewed_planning_focus_excludes_far_seeds_and_preserves_source(self):
         from app.services.photogrammetry.regional import make_plan
         from app.services.photogrammetry.runtime import identity
@@ -262,6 +285,7 @@ class ResumeTests(unittest.TestCase):
                 'views': [{'viewId': str(i), 'poseId': str(i), 'intrinsicId': 'i', 'path': str(src)} for i in range(2)],
                 'structure': [
                     {'X': [1,2,3], 'observations': [{'observationId': '0', 'x': [4,5]}]},
+                    {'X': [1,2,3], 'observations': [{'observationId': '0', 'x': [4+i,5]} for i in range(2)]},
                     {'X': [2,3,4], 'observations': [{'observationId': str(i), 'x': [6+i,8]} for i in range(2)]},
                 ],
             }
@@ -284,6 +308,40 @@ class ResumeTests(unittest.TestCase):
                     (sparse / 'images.txt').unlink()
                     self.assertEqual(export_colmap(sfm, root / 'scene'), summary)
                 self.assertEqual(image.stat().st_mtime_ns, before)
+
+    def test_distorted_corner_observations_match_calibrated_image(self):
+        import numpy as np
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as temp, patch.object(settings, 'disk_reserve_gb', 0):
+            root = Path(temp)
+            src = root / 'source.jpg'
+            Image.new('RGB', (192, 128), 'gray').save(src)
+            scale = 192 / 5472
+            f = 4331.781106170078 * scale
+            cx, cy = 2733.524624736311 * scale, 1766.4818708660046 * scale
+            distortion = [-.1838815068670066, -.017507539183009464, .049485392056877735]
+            ideal = np.array([[2., 2.], [190., 2.], [2., 126.], [190., 126.]])
+            xy = (ideal - [cx, cy]) / f
+            r2 = np.sum(xy**2, axis=1)
+            radial = 1 + distortion[0]*r2 + distortion[1]*r2**2 + distortion[2]*r2**3
+            observed = xy * radial[:, None] * f + [cx, cy]
+            header = {
+                'intrinsics': [{'intrinsicId': 'i', 'width': 192, 'height': 128,
+                    'pxFocalLength': f, 'principalPoint': [cx-96, cy-64], 'distortionParams': distortion}],
+                'poses': [{'poseId': str(i), 'pose': {'transform': {
+                    'rotation': [1,0,0,0,1,0,0,0,1], 'center': [0,0,0]}}} for i in range(2)],
+                'views': [{'viewId': str(i), 'poseId': str(i), 'intrinsicId': 'i', 'path': str(src)} for i in range(2)],
+                'structure': [{'X': [*ray, 1.], 'observations': [
+                    {'observationId': str(i), 'x': uv.tolist()} for i in range(2)]}
+                    for ray, uv in zip(xy, observed)],
+            }
+            sfm = root/'sfm.json'; sfm.write_text(json.dumps(header))
+            result = export_colmap(sfm, root/'scene')
+            self.assertEqual(result['points'], 4)
+            lines = (root/'scene/sparse/images.txt').read_text().splitlines()
+            for row in (lines[1], lines[3]):
+                exported = np.array(row.split(), float).reshape(-1, 3)[:, :2]
+                np.testing.assert_allclose(exported, ideal, atol=1e-8, rtol=0)
 
 
 if __name__ == '__main__':

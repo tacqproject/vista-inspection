@@ -267,6 +267,19 @@ výstupní pozorování se zapisují po jednom. Kontrola skutečných 2 019 855 
 vybrala 32 kamer a 189 358 bodů při 57,6 MiB RAM, s přesnou shodou všech
 zachovaných souřadnic a pozorování. Neúplný zápis nenahradí hotový soubor.
 
+Spolehlivý dělicí bod musí být pozorovaný alespoň ze tří různých snímků;
+více SIFT příznaků z téže fotografie se nepočítá jako další pohled. Export
+pro OpenMVS a výběr bodů části vyžadují alespoň dva různé snímky. Původní
+pozorování jinak zůstávají zachovaná, včetně více příznaků v jednom snímku.
+Inverze zkreslení bodů používá přesnější konvergenci v OpenCV 4 i 5;
+hotové plné PNG se kvůli tomu znovu nevytvářejí.
+
+Kontrola předání skutečného průběžného GPS SfM (302 kamer, 10 043 vybraných
+bodů, 57 718 pozorování) zachovala všechny vazby, polohy a připravené PNG.
+Odchylka přepočtu pozorování od nativní kalibrace klesla z maxima 0,241 px
+na méně než 0,000001 px. Tato kontrola ověřuje předání geometrie mezi formáty,
+nikoli správnost nebo úplnost dosud nedokončeného celého mostu.
+
 ## Diagnostika párování podle údajů z dronu
 
 `sfm-match-review` porovnává existující DSPSIFT shody s polohami a orientacemi

@@ -17,7 +17,7 @@ import numpy as np
 from .runtime import (Checkpoints, atomic_json, fingerprint, identity, require_space,
                       run_python_stage, sfm_header, sfm_items)
 
-VERSION = 2
+VERSION = 3
 MAX_VIEWS = 32
 REFINE_NEIGHBORS = (8, 4)
 
@@ -127,7 +127,10 @@ def make_plan(sfm: Path, work: Path) -> dict:
     views = {v['viewId'] for v in header['views'] if v.get('poseId') in poses}
     xyz = array('d')
     for lm in sfm_items(sfm, 'structure'):
-        if sum(o.get('observationId') in views for o in lm.get('observations', [])) >= 3:
+        # Different SIFT scales can contribute multiple features in one image.
+        # Reliability requires independent views, not just three feature rows.
+        if len({o['observationId'] for o in lm.get('observations', [])
+                if o.get('observationId') in views}) >= 3:
             xyz.extend(float(x) for x in lm['X'])
     points = np.frombuffer(xyz, dtype=np.float64).reshape(-1, 3)
     all_reliable_points = len(points)
@@ -215,7 +218,7 @@ def write_region_scene(path, header, landmarks, selected):
                 for line in stream:
                     lm = json.loads(line)
                     obs = [o for o in lm.get('observations', []) if o.get('observationId') in selected]
-                    if len(obs) < 2:
+                    if len({o['observationId'] for o in obs}) < 2:
                         continue
                     if count % 10000 == 0:
                         require_space(path.parent, 4_000_000, 'Příprava prostorové části')

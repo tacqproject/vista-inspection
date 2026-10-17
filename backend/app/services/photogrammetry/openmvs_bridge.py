@@ -74,6 +74,9 @@ def export_colmap(sfm_json: Path, out_dir: Path, max_side: int = 0, quality: int
     import cv2
 
     from .runtime import sfm_header, sfm_items, Checkpoints, identity
+    # OpenCV 5 merged the iterative overload into undistortPoints.
+    undistort_points = getattr(cv2, 'undistortPointsIter', cv2.undistortPoints)
+    undistort_criteria = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 30, 1e-12)
     data = sfm_header(Path(sfm_json))
     cv2.setNumThreads(2)
     out_dir = Path(out_dir)
@@ -112,7 +115,7 @@ def export_colmap(sfm_json: Path, out_dir: Path, max_side: int = 0, quality: int
                       "w": w, "h": h, "s": s, "name": name})
     by_view = {vw["view"]["viewId"]: vw for vw in views}
     cp = Checkpoints(out_dir)
-    inputs = {'version': 2, 'sfm': identity(Path(sfm_json)), 'max_side': max_side,
+    inputs = {'version': 3, 'sfm': identity(Path(sfm_json)), 'max_side': max_side,
               'quality': quality, 'interp': interp,
               'sources': [identity(Path(vw['view']['path'])) for vw in views]}
     if cp.valid('export', inputs):
@@ -191,13 +194,18 @@ def export_colmap(sfm_json: Path, out_dir: Path, max_side: int = 0, quality: int
             for landmark in sfm_items(Path(sfm_json), 'structure'):
                 observations = [(by_view[ob['observationId']], ob) for ob in landmark.get('observations', [])
                                 if ob.get('observationId') in by_view]
-                if len(observations) < 2:
+                if len({vw['id'] for vw, _ in observations}) < 2:
                     continue
                 n_points += 1
                 track = []
                 for vw, ob in observations:
                     xy = np.array([[[float(ob['x'][0]), float(ob['x'][1])]]], float)
-                    u = cv2.undistortPoints(xy, vw['K'], vw['dist'], P=vw['K'])[0, 0] * vw['s']
+                    # The five-iteration default leaves up to 0.24 px of error
+                    # at the Corvallis DNG corners. Match the image calibration
+                    # to subpixel precision without resampling the image again.
+                    u = undistort_points(
+                        xy, vw['K'], vw['dist'], R=None, P=vw['K'], criteria=undistort_criteria,
+                    )[0, 0] * vw['s']
                     vid = vw['id']
                     track.append(f'{vid} {counts[vid]}')
                     append(vid, f'{u[0]} {u[1]} {n_points} ')
