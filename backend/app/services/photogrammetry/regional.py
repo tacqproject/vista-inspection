@@ -17,7 +17,7 @@ import numpy as np
 from .runtime import (Checkpoints, atomic_json, fingerprint, identity, require_space,
                       run_python_stage, sfm_header, sfm_items)
 
-VERSION = 1
+VERSION = 2
 MAX_VIEWS = 32
 REFINE_NEIGHBORS = (8, 4)
 
@@ -84,10 +84,41 @@ def partition(points: np.ndarray, max_points=40000, max_regions=128):
     return sorted(result, key=lambda c: tuple(c['centre']))
 
 
+def load_region_focus(sfm: Path):
+    """Optional, explicitly reviewed planning area in this exact SfM frame.
+
+    This selects partition seeds, not source photos or SfM observations. All
+    nearby landmarks remain available as reconstruction context. Two axes
+    bound a horizontal area without clipping the height of the structure.
+    """
+    path = sfm.parent / 'regional-focus.json'
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text())
+    try:
+        if data['version'] != 1 or data['accepted'] is not True or data['sfm'] != identity(sfm):
+            raise ValueError('focus is not approved for this SfM')
+        axes = np.asarray(data['axes'], dtype=float)
+        origin = np.asarray(data['origin'], dtype=float)
+        lower, upper = np.asarray(data['lower'], dtype=float), np.asarray(data['upper'], dtype=float)
+        dimensions = len(axes)
+        if (dimensions not in (2, 3) or axes.shape != (dimensions, 3) or origin.shape != (3,)
+                or lower.shape != (dimensions,) or upper.shape != (dimensions,)
+                or not all(np.isfinite(x).all() for x in (axes, origin, lower, upper))
+                or not np.all(upper > lower)
+                or not np.allclose(axes @ axes.T, np.eye(dimensions), atol=1e-6, rtol=0)):
+            raise ValueError('invalid focus axes or bounds')
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f'Neplatná oblast pro prostorové části: {exc}') from exc
+    return data
+
+
 def make_plan(sfm: Path, work: Path) -> dict:
     work.mkdir(parents=True, exist_ok=True)
     cp = Checkpoints(work)
-    key = [identity(sfm), VERSION]
+    focus = load_region_focus(sfm)
+    focus_path = sfm.parent / 'regional-focus.json'
+    key = [identity(sfm), VERSION, identity(focus_path) if focus else None]
     target = work / 'plan.json'
     if cp.valid('plan', key):
         return json.loads(target.read_text())
@@ -99,6 +130,11 @@ def make_plan(sfm: Path, work: Path) -> dict:
         if sum(o.get('observationId') in views for o in lm.get('observations', [])) >= 3:
             xyz.extend(float(x) for x in lm['X'])
     points = np.frombuffer(xyz, dtype=np.float64).reshape(-1, 3)
+    all_reliable_points = len(points)
+    if focus:
+        projected = (points - np.asarray(focus['origin'])) @ np.asarray(focus['axes']).T
+        inside = np.all((projected >= focus['lower']) & (projected <= focus['upper']), axis=1)
+        points = points[inside]
     if len(points) < 100:
         raise RuntimeError('Nedostatek spolehlivých SfM bodů pro prostorové části.')
     regions = partition(points)
@@ -126,6 +162,8 @@ def make_plan(sfm: Path, work: Path) -> dict:
             f.close()
     result = {'version': VERSION, 'sfm': str(sfm), 'regions': regions,
               'reliable_points': len(points), 'max_views': MAX_VIEWS,
+              'source_reliable_points': all_reliable_points, 'planning_focus': focus,
+              'outside_planning_focus': all_reliable_points - len(points),
               'dense_level': 0, 'refine_level': 0, 'texture': 'photo-resolution',
               'refine_neighbors': list(REFINE_NEIGHBORS),
               'ai_preset': 'normal_prior.PRESET'}

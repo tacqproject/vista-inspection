@@ -313,3 +313,15 @@ adresáři pod `meshroom_cache/approved-sfm/`; také rozhodnutí o kvalitě mus�
 obsahovat `accepted: true`. Změněný vstup či výstup výběr zneplatní a zastaví
 navazující práci. Hustá rekonstrukce, export kamer i projekce tak používají
 stejnou zkontrolovanou souřadnou soustavu; nový SfM dostane vlastní scratch.
+
+Volitelný `regional-focus.json` vedle schváleného `sfm.json` vymezuje oblast,
+ze které se vybírají body pro rozdělení na části. Vzdálené pozadí či chybné
+body tak nemusí zvětšovat části na stovky metrů. Tento soubor musí být také
+zahrnutý v identitách `outputs` schváleného výběru. Obsahuje `version: 1`,
+`accepted: true`, identitu `sfm`, trojrozměrný `origin`, dvě nebo tři navzájem
+kolmé jednotkové osy `axes` a meze `lower`, `upper` v těchto osách. Dvě
+vodorovné osy neomezují výšku konstrukce. Rozsah se určuje až po kontrole
+geometrie a pokrytí celého mostu; není automaticky odhadován z jednotlivé
+fotografie. Původní SfM a fotografie zůstávají celé, blízké okolní body se
+nadále používají jako kontext. Plán zaznamenává počet bodů mimo oblast a při
+změně jejího schváleného rozsahu se vytvoří znovu.

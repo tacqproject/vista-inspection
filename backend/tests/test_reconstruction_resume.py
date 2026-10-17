@@ -12,11 +12,55 @@ from app.services.photogrammetry.postprocess.openmvs import dense_pixels
 
 
 class ResumeTests(unittest.TestCase):
+    def test_reviewed_planning_focus_excludes_far_seeds_and_preserves_source(self):
+        from app.services.photogrammetry.regional import make_plan
+        from app.services.photogrammetry.runtime import identity
+        import numpy as np
+        with tempfile.TemporaryDirectory() as temp, patch.object(settings, 'disk_reserve_gb', 0):
+            root = Path(temp)
+            sfm = root/'sfm.json'
+            near = np.column_stack([np.linspace(-2,2,240), np.linspace(-5,5,240), np.zeros(240)])
+            far = np.array([[10000+i,0,0] for i in range(120)])
+            data = {'views': [{'viewId': str(i), 'poseId': str(i)} for i in range(3)],
+                    'poses': [{'poseId': str(i)} for i in range(3)], 'intrinsics': [],
+                    'structure': [{'landmarkId': str(j), 'X': p.tolist(),
+                                   'observations': [{'observationId': str(i)} for i in range(3)]}
+                                  for j, p in enumerate(np.r_[near,far])]}
+            original = json.dumps(data)
+            sfm.write_text(original)
+            focus = {'version': 1, 'accepted': True, 'sfm': identity(sfm),
+                     'origin': [0,0,0], 'axes': [[1,0,0],[0,0,1]],
+                     'lower': [-3,-3], 'upper': [3,3]}
+            target = root/'regional-focus.json'
+            target.write_text(json.dumps(focus))
+            work = root/'plan'
+            plan = make_plan(sfm, work)
+            self.assertEqual(plan['source_reliable_points'], 360)
+            self.assertEqual(plan['reliable_points'], 240)
+            self.assertEqual(plan['outside_planning_focus'], 120)
+            self.assertLess(max(r['radius'] for r in plan['regions']), 7)
+            # Two horizontal axes leave all heights available, including footings.
+            kept = [json.loads(s) for s in (work/'C000/landmarks.jsonl').read_text().splitlines()]
+            self.assertEqual({lm['landmarkId'] for lm in kept}, {str(i) for i in range(240)})
+            self.assertEqual(sfm.read_text(), original)
+            before = (work/'plan.json').stat().st_mtime_ns
+            self.assertEqual(make_plan(sfm,work), plan)
+            self.assertEqual((work/'plan.json').stat().st_mtime_ns, before)
+            # A reviewed focus change invalidates the old partition checkpoint.
+            target.write_text(json.dumps({**focus, 'lower': [0,-3]}))
+            self.assertEqual(make_plan(sfm,work)['reliable_points'], 120)
+            for change in ({'accepted': False}, {'sfm': {**identity(sfm), 'size': 1}},
+                           {'axes': [[1,0,0],[1,0,0]]}, {'upper': [-4,3]}):
+                with self.subTest(change=change):
+                    target.write_text(json.dumps({**focus, **change}))
+                    with self.assertRaisesRegex(RuntimeError, 'Neplatná oblast'):
+                        make_plan(sfm,work)
+
     def test_reviewed_sfm_frame_is_used_consistently_and_stale_selection_fails(self):
         import asyncio
         from app.services.photogrammetry.runtime import identity
         from app.services.photogrammetry.postprocess.openmvs import _export_sfm_json
-        for change in ('none', 'native', 'camera', 'rejected', 'outside', 'symlink'):
+        for change in ('none', 'native', 'camera', 'rejected', 'outside', 'symlink', 'untracked-focus', 'focus-changed'):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as temp:
                 base = Path(temp)
                 cache = base / 'cache'
@@ -36,6 +80,12 @@ class ResumeTests(unittest.TestCase):
                           'native': [identity(native/n) for n in ('sfm.abc', 'cameras.sfm')],
                           'outputs': {n: identity(folder/n) for n in
                                       ('sfm.json', 'cameras.sfm', 'quality-decision.json')}}
+                if change in ('untracked-focus', 'focus-changed'):
+                    focus_path = folder/'regional-focus.json'
+                    focus_path.write_text('reviewed focus')
+                    if change == 'focus-changed':
+                        record['outputs']['regional-focus.json'] = identity(focus_path)
+                        focus_path.write_text('changed focus')
                 if change in ('outside', 'symlink'):
                     outside = base/'outside'
                     folder.parent.rename(outside)

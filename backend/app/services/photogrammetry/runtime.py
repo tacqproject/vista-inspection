@@ -141,7 +141,8 @@ def _approved_sfm(cache: Path, native: Path, selection: Path) -> Path:
         if record['native'] != inputs:
             raise ValueError('the source SfM has changed')
         expected = {'sfm.json', 'cameras.sfm', 'quality-decision.json'}
-        if set(record['outputs']) != expected:
+        outputs = set(record['outputs'])
+        if not expected.issubset(outputs) or outputs - expected - {'regional-focus.json'}:
             raise ValueError('incomplete candidate outputs')
         parents = set()
         for name, item in record['outputs'].items():
@@ -153,6 +154,8 @@ def _approved_sfm(cache: Path, native: Path, selection: Path) -> Path:
         if len(parents) != 1:
             raise ValueError('candidate outputs come from different directories')
         folder = parents.pop()
+        if (folder / 'regional-focus.json').exists() != ('regional-focus.json' in outputs):
+            raise ValueError('regional focus is not covered by the reviewed selection')
         if json.loads((folder / 'quality-decision.json').read_text())['accepted'] is not True:
             raise ValueError('candidate failed quality review')
         return folder
