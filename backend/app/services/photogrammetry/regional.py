@@ -134,8 +134,68 @@ def make_plan(sfm: Path, work: Path) -> dict:
     return result
 
 
+def select_region_views(header, landmarks, centre, radius, max_views, min_obs=10):
+    """Same ranking as hires.select_views, without retaining the landmark tree."""
+    counts = {}
+    with Path(landmarks).open() as stream:
+        for line in stream:
+            lm = json.loads(line)
+            if np.linalg.norm(np.asarray(lm['X'], float) - centre) < radius:
+                for obs in lm['observations']:
+                    vid = obs['observationId']
+                    counts[vid] = counts.get(vid, 0) + 1
+    poses = {p['poseId']: p['pose']['transform'] for p in header['poses']}
+    pose_of = {v['viewId']: v['poseId'] for v in header['views']}
+    for vid in list(counts):
+        pose = poses.get(pose_of.get(vid))
+        if pose is None:
+            counts.pop(vid)
+            continue
+        rotation = np.asarray(pose['rotation'], float).reshape(3, 3)
+        direction = centre - np.asarray(pose['center'], float)
+        if rotation[:, 2] @ direction / (np.linalg.norm(direction) + 1e-9) < 0.57:
+            counts.pop(vid)
+    ranked = sorted(counts.items(), key=lambda item: -item[1])
+    if not ranked:
+        return set(), []
+    threshold = max(min_obs, int(0.02 * ranked[0][1]))
+    keep = [vid for vid, count in ranked if count >= threshold][:max_views]
+    return set(keep), ranked
+
+
+def write_region_scene(path, header, landmarks, selected):
+    """Keep all qualifying tracks, serializing one at a time to an atomic file."""
+    temp = path.with_name(path.name + '.tmp')
+    count = 0
+    require_space(path.parent, Path(landmarks).stat().st_size + 4_000_000, 'Příprava prostorové části')
+    try:
+        with temp.open('w', buffering=1048576) as output:
+            # Only the small camera header is materialized as a JSON string.
+            output.write(json.dumps(header, ensure_ascii=False, separators=(',', ':'))[:-1])
+            output.write(',"structure":[')
+            with Path(landmarks).open() as stream:
+                for line in stream:
+                    lm = json.loads(line)
+                    obs = [o for o in lm.get('observations', []) if o.get('observationId') in selected]
+                    if len(obs) < 2:
+                        continue
+                    if count % 10000 == 0:
+                        require_space(path.parent, 4_000_000, 'Příprava prostorové části')
+                    if count:
+                        output.write(',')
+                    output.write(json.dumps({**lm, 'observations': obs}, ensure_ascii=False,
+                                            separators=(',', ':')))
+                    count += 1
+            output.write(']}\n')
+            output.flush()
+            os.fsync(output.fileno())
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
+    return count
+
+
 def prepare_region(sfm, global_work, plan_path, work, index, max_views):
-    from app.services.hires import select_views
     from app.services.raw_images import is_raw
     from .openmvs_bridge import export_colmap
     plan = json.loads(plan_path.read_text())
@@ -146,12 +206,9 @@ def prepare_region(sfm, global_work, plan_path, work, index, max_views):
     sub_path = work / 'sub_sfm.json'
     header = sfm_header(sfm)
     if not cp.valid('sub-scene', key):
-        data = {**header, 'structure': []}
-        with (Path(region['folder']) / 'landmarks.jsonl').open() as stream:
-            for line in stream:
-                data['structure'].append(json.loads(line))
-        selected, ranked = select_views(data, np.asarray(region['centre']), region['radius'] * 1.15,
-                                        max_views=max_views, min_obs=10)
+        landmarks = Path(region['folder']) / 'landmarks.jsonl'
+        selected, ranked = select_region_views(header, landmarks, np.asarray(region['centre']),
+                                               region['radius'] * 1.15, max_views, min_obs=10)
         if len(selected) < 3:
             raise RuntimeError(f'Část {index}: pouze {len(selected)} vhodných kamer.')
         poses = {p['poseId'] for p in header['poses']}
@@ -163,12 +220,7 @@ def prepare_region(sfm, global_work, plan_path, work, index, max_views):
                         for v in header['views'] if v['viewId'] in selected]
         pose_ids = {v['poseId'] for v in sub['views']}
         sub['poses'] = [p for p in header['poses'] if p['poseId'] in pose_ids]
-        sub['structure'] = []
-        for lm in data['structure']:
-            obs = [o for o in lm.get('observations', []) if o.get('observationId') in selected]
-            if len(obs) >= 2:
-                sub['structure'].append({**lm, 'observations': obs})
-        atomic_json(sub_path, sub)
+        write_region_scene(sub_path, sub, landmarks, selected)
         cp.save('sub-scene', key, [sub_path])
     result = export_colmap(sub_path, work)
     return {**result, 'index': index, 'max_views': max_views}

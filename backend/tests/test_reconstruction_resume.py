@@ -12,6 +12,58 @@ from app.services.photogrammetry.postprocess.openmvs import dense_pixels
 
 
 class ResumeTests(unittest.TestCase):
+    def test_streamed_region_selection_and_tracks_match_reference(self):
+        import numpy as np
+        from app.services.hires import select_views
+        from app.services.photogrammetry.regional import select_region_views, write_region_scene
+        header = {
+            'intrinsics': [],
+            'views': [{'viewId': str(i), 'poseId': str(i)} for i in range(5)],
+            'poses': [{'poseId': str(i), 'pose': {'transform': {
+                'rotation': [1,0,0,0,1,0,0,0,1], 'center': [0,0,10 if i == 3 else 0]}}}
+                for i in range(4)],
+        }
+        landmarks = [
+            {'landmarkId': str(i), 'X': [i / 20, 0, 5], 'color': [10,20,30],
+             'observations': [{'observationId': str(j), 'featureId': str(i+j), 'x': [i,j], 'scale': 2}
+                              for j in (0,1,2,3,4) if j != 2 or i % 2 == 0]}
+            for i in range(20)]
+        landmarks += [{'landmarkId': 'outside', 'X': [100,0,5],
+                       'observations': [{'observationId': '2'}]}]
+        centre = np.array([0,0,5], float)
+        with tempfile.TemporaryDirectory() as temp, patch.object(settings, 'disk_reserve_gb', 0):
+            root = Path(temp)
+            source = root / 'landmarks.jsonl'
+            source.write_text(''.join(json.dumps(lm) + '\n' for lm in landmarks))
+            for max_views in (1,2,4):
+                expected = select_views({**header, 'structure': landmarks}, centre, 2,
+                                        max_views=max_views, min_obs=3)
+                actual = select_region_views(header, source, centre, 2, max_views, min_obs=3)
+                self.assertEqual(actual, expected)
+            selected, _ = select_region_views(header, source, centre, 2, 2, min_obs=3)
+            target = root / 'sub.json'
+            count = write_region_scene(target, header, source, selected)
+            expected_tracks = []
+            for lm in landmarks:
+                obs = [o for o in lm['observations'] if o['observationId'] in selected]
+                if len(obs) >= 2:
+                    expected_tracks.append({**lm, 'observations': obs})
+            self.assertEqual(json.loads(target.read_text()), {**header, 'structure': expected_tracks})
+            self.assertEqual(count, len(expected_tracks))
+
+    def test_streamed_region_failure_preserves_complete_scene(self):
+        from app.services.photogrammetry.regional import write_region_scene
+        with tempfile.TemporaryDirectory() as temp, patch.object(settings, 'disk_reserve_gb', 0):
+            root = Path(temp)
+            source = root / 'landmarks.jsonl'
+            source.write_text('{invalid JSON\n')
+            target = root / 'sub.json'
+            target.write_text('previous complete scene')
+            with self.assertRaises(ValueError):
+                write_region_scene(target, {'views': []}, source, {'1','2'})
+            self.assertEqual(target.read_text(), 'previous complete scene')
+            self.assertFalse(target.with_name('sub.json.tmp').exists())
+
     def test_refinement_keeps_reference_views_and_only_reduces_after_oom(self):
         from app.services.photogrammetry.regional import refine_region
         from app.services.photogrammetry.openmvs_bridge import OpenMVSError
