@@ -259,3 +259,57 @@ zámkem; cache kontroluje identitu zdrojového exportu a délku binárního
 souboru. Test skutečných 98 885 landmarků (157,7 MB JSON) spotřeboval 33,5 MiB
 paměti procesu. Při nasazování této úpravy do již běžící rekonstrukce se
 restart API odkládá až po jejím dokončení; průběh nesmí zničit nasazení webu.
+
+Příprava regionu také průběžně čte jeho `landmarks.jsonl`. Překryvy mohou
+způsobit, že tento soubor obsahuje mnohem více bodů než původní dělicí buňka.
+Výběr kamer používá stejné skóre, směrový filtr a prahy jako `hires.select_views`;
+výstupní pozorování se zapisují po jednom. Kontrola skutečných 2 019 855 bodů
+vybrala 32 kamer a 189 358 bodů při 57,6 MiB RAM, s přesnou shodou všech
+zachovaných souřadnic a pozorování. Neúplný zápis nenahradí hotový soubor.
+
+## Diagnostika párování podle údajů z dronu
+
+`sfm-match-review` porovnává existující DSPSIFT shody s polohami a orientacemi
+z EXIF. V samostatném pracovním adresáři importuje původní indexy příznaků,
+kamerovou kalibraci a dvojice do COLMAP, znovu odhadne dvoupohledovou geometrii
+a uloží rozdíly vůči údajům dronu. Čtyři CPU procesy běží v omezeném RAW
+workeru bez sítě. `pair-review.json` a databáze umožňují pokračovat po
+přerušení; změna původních vstupů vyžaduje nový pracovní adresář.
+
+Tento diagnostický krok sám nefiltruje shody, nenahrazuje SfM a nespouští
+hustou rekonstrukci. Scénáře prahů v `review-summary.json` slouží k posouzení
+vazeb a propojenosti sady. GPS a gimbal metadata jsou přibližné údaje;
+nejsou náhradou geodetických kontrolních bodů.
+
+Před použitím se připraví soukromý Python 3.11 a verze knihoven ověřené
+pevnými SHA-256 wheelů, bez zásahu do prostředí API nebo systému:
+
+```sh
+python3 scripts/raw/install_sfm_runtime.py
+python3 scripts/raw/install_colmap_runtime.py
+/media/epr/ssd/vista-raw/tools/python-colmap-4.2.1/bin/python scripts/raw/test_gps_sfm.py
+```
+
+Pevné argumenty brokeru pro `sfm-match-review` jsou `sfm` (hlavička kamer),
+`features`, `matches`, `metadata`, `work` a `result`. Všechny cesty musejí
+ležet uvnitř izolovaného RAW úložiště. Zdrojové DNG se v této etapě nečtou
+ani znovu nepřevádějí.
+
+Navazující `sfm-gps-map` (`review`, `work`, `result`) vytvoří samostatnou
+kopii databáze a kandidáta nové geometrie. Zachovává původní kalibraci a
+indexy příznaků. Odmítá výrazně nesouhlasné dvoupohledové vazby, ověřuje
+propojenost sady a používá přibližné GPS jako měkké poziční omezení. Výška
+má slabší váhu kvůli rozdílům GPS mezi lety. Průběžné snímky modelu umožňují
+obnovu; export do formátu AliceVision zapisuje body po jednom a zachovává
+jedinou společnou souřadnou soustavu. Ani tento krok automaticky nenahrazuje
+výsledek v inspekci: kandidát musí projít kontrolou geometrie a pokrytí.
+Shoda s GPS zde není nezávislé ověření, protože GPS vstupuje do optimalizace.
+
+Po kontrole lze konkrétní geometrii vybrat pomocí `meshroom_cache/approved-sfm.json`.
+Záznam verze 1 obsahuje `accepted: true`, identity původních `sfm.abc` a
+`cameras.sfm` v poli `native` a identity tří výstupů v mapě `outputs`:
+`sfm.json`, `cameras.sfm`, `quality-decision.json`. Výstupy musejí být v jednom
+adresáři pod `meshroom_cache/approved-sfm/`; také rozhodnutí o kvalitě musí
+obsahovat `accepted: true`. Změněný vstup či výstup výběr zneplatní a zastaví
+navazující práci. Hustá rekonstrukce, export kamer i projekce tak používají
+stejnou zkontrolovanou souřadnou soustavu; nový SfM dostane vlastní scratch.

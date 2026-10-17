@@ -12,6 +12,50 @@ from app.services.photogrammetry.postprocess.openmvs import dense_pixels
 
 
 class ResumeTests(unittest.TestCase):
+    def test_reviewed_sfm_frame_is_used_consistently_and_stale_selection_fails(self):
+        import asyncio
+        from app.services.photogrammetry.runtime import identity
+        from app.services.photogrammetry.postprocess.openmvs import _export_sfm_json
+        for change in ('none', 'native', 'camera', 'rejected', 'outside', 'symlink'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temp:
+                base = Path(temp)
+                cache = base / 'cache'
+                native = cache / 'StructureFromMotion/current'
+                native.mkdir(parents=True)
+                (cache/'project.mg').write_text(json.dumps({'graph': {
+                    'sfm': {'nodeType': 'StructureFromMotion', 'uid': 'current'}}}))
+                (native/'status').write_text('{"status":"SUCCESS"}')
+                for name in ('sfm.abc', 'cameras.sfm'):
+                    (native/name).write_text('native frame')
+                folder = cache / 'approved-sfm/candidate'
+                folder.mkdir(parents=True)
+                for name in ('sfm.json', 'cameras.sfm'):
+                    (folder/name).write_text('accepted frame')
+                (folder/'quality-decision.json').write_text(json.dumps({'accepted': change != 'rejected'}))
+                record = {'version': 1, 'accepted': True,
+                          'native': [identity(native/n) for n in ('sfm.abc', 'cameras.sfm')],
+                          'outputs': {n: identity(folder/n) for n in
+                                      ('sfm.json', 'cameras.sfm', 'quality-decision.json')}}
+                if change in ('outside', 'symlink'):
+                    outside = base/'outside'
+                    folder.parent.rename(outside)
+                    if change == 'symlink':
+                        (cache/'approved-sfm').symlink_to(outside, target_is_directory=True)
+                    record['outputs'] = {n: identity(outside/'candidate'/n) for n in record['outputs']}
+                (cache/'approved-sfm.json').write_text(json.dumps(record))
+                if change == 'native':
+                    (native/'sfm.abc').write_text('new native frame')
+                elif change == 'camera':
+                    (folder/'cameras.sfm').write_text('inconsistent camera frame')
+                if change == 'none':
+                    self.assertEqual(current_sfm(cache), folder)
+                    with patch('app.services.photogrammetry.postprocess.openmvs.run_python_stage',
+                               side_effect=AssertionError('accepted JSON must not be replaced')):
+                        self.assertEqual(asyncio.run(_export_sfm_json(cache, base/'log')), folder/'sfm.json')
+                else:
+                    with self.assertRaisesRegex(RuntimeError, 'Neplatný schválený SfM kandidát'):
+                        current_sfm(cache)
+
     def test_streamed_region_selection_and_tracks_match_reference(self):
         import numpy as np
         from app.services.hires import select_views

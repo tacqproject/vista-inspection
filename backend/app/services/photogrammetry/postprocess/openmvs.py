@@ -40,6 +40,10 @@ def uses_openmvs(params: dict) -> bool:
 async def _export_sfm_json(cache_dir: Path, log: Path) -> Path:
     """Export the graph's completed SfM once; never pick another run's frame."""
     folder = current_sfm(cache_dir)
+    if (cache_dir / 'approved-sfm.json').exists():
+        # current_sfm validated both camera and point identities, their review,
+        # and the native graph they supersede. Preserve this exact JSON/frame.
+        return folder / 'sfm.json'
     inputs = identity(folder / 'sfm.abc')
     cp = Checkpoints(cache_dir / 'exports')
     out = cache_dir / 'sfm.json'

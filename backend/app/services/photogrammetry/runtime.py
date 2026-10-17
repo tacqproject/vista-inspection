@@ -120,7 +120,44 @@ def current_sfm(cache: Path) -> Path:
     for name in ('sfm.abc', 'cameras.sfm'):
         if not (folder / name).is_file() or (folder / name).stat().st_size == 0:
             raise RuntimeError(f'Chybí dokončený SfM výstup {name}')
+    selection = cache / 'approved-sfm.json'
+    if selection.exists():
+        return _approved_sfm(cache, folder, selection)
     return folder
+
+
+def _approved_sfm(cache: Path, native: Path, selection: Path) -> Path:
+    """Use an explicitly reviewed candidate, never mix two reconstruction frames.
+
+    The selection is bound to the original graph's exact outputs. A stale or
+    incomplete selection fails closed instead of falling back to bad geometry.
+    Candidate outputs and their quality decision stay inside this cache.
+    """
+    try:
+        record = json.loads(selection.read_text())
+        if record['version'] != 1 or record['accepted'] is not True:
+            raise ValueError('candidate has not been accepted')
+        inputs = [identity(native / n) for n in ('sfm.abc', 'cameras.sfm')]
+        if record['native'] != inputs:
+            raise ValueError('the source SfM has changed')
+        expected = {'sfm.json', 'cameras.sfm', 'quality-decision.json'}
+        if set(record['outputs']) != expected:
+            raise ValueError('incomplete candidate outputs')
+        parents = set()
+        for name, item in record['outputs'].items():
+            path = Path(item['path']).resolve()
+            if (path.name != name or not path.is_relative_to(cache.resolve() / 'approved-sfm')
+                    or path.stat().st_size == 0 or identity(path) != item):
+                raise ValueError('candidate output changed or escapes its storage')
+            parents.add(path.parent)
+        if len(parents) != 1:
+            raise ValueError('candidate outputs come from different directories')
+        folder = parents.pop()
+        if json.loads((folder / 'quality-decision.json').read_text())['accepted'] is not True:
+            raise ValueError('candidate failed quality review')
+        return folder
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(f'Neplatný schválený SfM kandidát: {exc}') from exc
 
 
 def recover_interrupted_statuses(cache: Path) -> int:

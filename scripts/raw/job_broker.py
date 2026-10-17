@@ -28,6 +28,8 @@ _slot = threading.Semaphore(1)
 
 # These are fixed application functions, not arbitrary Python/shell execution.
 PYTHON_STAGES = {
+    'sfm-match-review': {'sfm', 'features', 'matches', 'metadata', 'work', 'result'},
+    'sfm-gps-map': {'review', 'work', 'result'},
     'export-sfm': {'sfm', 'output', 'result'},
     'export-colmap': {'sfm', 'work', 'result'},
     'clean-mesh': {'mesh', 'output', 'result', 'keep_largest'},
@@ -63,6 +65,18 @@ def python_command(stage, payload, root, readonly, uid, pinned):
     if repo not in readonly:
         raise ValueError('RAW repository is not an approved read-only root')
     name = 'vista-raw-job-' + uuid.uuid4().hex[:16]
+    if stage in {'sfm-match-review', 'sfm-gps-map'}:
+        python = root / 'tools/python-colmap-4.2.1/bin/python'
+        if not python.is_file():
+            raise ValueError('Install the isolated PyCOLMAP 4.2.1 runtime')
+        command = bounded_command(name, uid) + [
+            '-v', f'{root}:{root}:rw', '-v', f'{repo}:{repo}:ro',
+            '-e', 'HOME=/tmp', '-e', 'LD_LIBRARY_PATH=',
+            '-e', 'OMP_NUM_THREADS=' + ('1' if stage == 'sfm-match-review' else '8'),
+            '-e', 'OPENBLAS_NUM_THREADS=1',
+            '-e', 'PYTHONDONTWRITEBYTECODE=1', pinned['vista-meshroom:latest'],
+            str(python), '-u', str(repo / 'scripts/raw/gps_sfm.py'), stage, json.dumps(payload)]
+        return command, name
     if stage == 'export-sfm':
         # Match the ABI of Meshroom's installed bindings without changing
         # the API's Python or any shared/system installation.

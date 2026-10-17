@@ -171,6 +171,31 @@ class RawIsolationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate(payload, [repo, meshroom])
 
+    def test_sfm_geometry_stages_use_pinned_private_runtime_and_raw_paths(self):
+        repo = Path(broker.__file__).resolve().parents[2]
+        python = self.root / 'tools/python-colmap-4.2.1/bin/python'
+        python.parent.mkdir(parents=True)
+        python.touch()
+        stages = {'sfm-match-review': ('sfm', 'features', 'matches', 'metadata', 'work', 'result'),
+                  'sfm-gps-map': ('review', 'work', 'result')}
+        for stage, keys in stages.items():
+            with self.subTest(stage=stage):
+                payload = {k: str(self.root/k) for k in keys}
+                def validate(data):
+                    return broker.validate(['python-stage', stage, json.dumps(data)], self.root,
+                                           [repo], '1000:1000', {'vista-meshroom:latest': 'sha256:pinned'})
+                command, _ = validate(payload)
+                self.assertIn(str(python), command)
+                self.assertIn(str(repo/'scripts/raw/gps_sfm.py'), command)
+                self.assertIn('sha256:pinned', command)
+                self.assertIn('--read-only', command)
+                self.assertIn('--network', command)
+                self.assertIn('24g', command)
+                with self.assertRaises(ValueError):
+                    validate({**payload, 'work': str(self.source)})
+                with self.assertRaises(ValueError):
+                    validate({**payload, 'code': 'arbitrary'})
+
     def test_additional_readonly_dataset_preserves_source_boundaries(self):
         second = self.base / 'second-dataset'
         second.mkdir()
