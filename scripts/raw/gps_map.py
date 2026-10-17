@@ -112,6 +112,8 @@ def options(manifest, work):
     opt.min_model_size = min(10, len(manifest['views']))
     opt.max_num_models = 5
     opt.snapshot_path = work/'snapshots'
+    # COLMAP creates each numbered snapshot, but requires its parent to exist.
+    (work/'snapshots').mkdir(parents=True, exist_ok=True)
     opt.snapshot_frames_freq = PROFILE['snapshot_frames']
     return opt
 

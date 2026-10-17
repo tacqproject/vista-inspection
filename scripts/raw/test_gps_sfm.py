@@ -56,7 +56,7 @@ class MatchReviewTests(unittest.TestCase):
             meta.write_text(json.dumps(metadata))
             args = dict(sfm=str(sfm), features=str(features), matches=str(matches),
                         metadata=str(meta), work=str(work), result=str(work/'result.json'))
-            with patch.object(gps_sfm, 'reserve'):
+            with patch.object(gps_sfm, 'reserve'), patch.dict(gps_map.PROFILE, snapshot_frames=2):
                 result = gps_sfm.review(args)
                 self.assertEqual(result['views'], 6)
                 self.assertEqual(result['pairs'], 15)
@@ -77,6 +77,7 @@ class MatchReviewTests(unittest.TestCase):
                 mapped = gps_map.map_scene(mapping_args)
                 self.assertEqual(mapped['registered'], 6)
                 self.assertFalse(mapped['accepted'])
+                self.assertTrue(gps_map.latest_snapshot(mapping_work))
                 output = json.loads((mapping_work/'sfm.json').read_text())
                 poses = {p['poseId']: p['pose']['transform'] for p in output['poses']}
                 errors = []
