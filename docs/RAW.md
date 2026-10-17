@@ -123,8 +123,8 @@ Změna brokeru: `systemctl --user restart vista-raw-broker.service`, bez běží
 úloh. Žádný z těchto příkazů nerestartuje původní VISTA.
 
 Kontejnery mají `restart: unless-stopped`. Broker je uživatelská systemd služba;
-na tomto hostu není zapnutý linger, proto pro broker musí běžet uživatelská
-systemd relace (typicky po přihlášení uživatele epr).
+pro uživatele `epr` je zapnutý linger, takže broker a dohled pokračují také
+po odhlášení uživatele.
 
 `docker-compose.yml` je samostatné vývojové prostředí s jinými porty a vlastní
 datovou volume. Nenasazuje hostitelský GPU broker; na epr-bedna se používá
@@ -180,6 +180,22 @@ AliceVision binárek přidává `--maxCoresAvailable=8` a paměťovou nápovědu
 20 GiB. Obal se připojuje pouze uvnitř RAW workeru; společná instalace
 Meshroomu se nemění. Ověření nového grafu 798 snímků zachovalo UID všech
 čtyř předchozích etap, tedy i hotové příznaky a párování.
+
+Velká sada dokončila SfM s 793 kamerami a 2 019 855 body, ale původní nativní
+export do JSON překročil 24 GiB při sestavování celého stromu v paměti.
+RAW nyní používá `stream_sfm.py`: načte hotové Alembic SfM a nativním
+AliceVision serializérem zapisuje dávky 5 000 bodů. Zachovává souřadnice,
+barvy, deskriptory i všechna pozorování; hotový JSON zveřejní atomicky.
+Samotné SfM se kvůli exportu neopakuje. Pro ABI instalovaných bindings má
+tento worker vlastní Python 3.11 v `tools/python-sfm`, bez změn Pythonu API
+nebo společného Meshroomu. Při novém nasazení ho připraví:
+
+```sh
+python3 scripts/raw/install_sfm_runtime.py
+```
+
+Instalátor ověřuje pevný SHA-256 archivu Python Build Standalone; neinstaluje
+nic do systému. Exportní worker zůstává bez sítě a v limitu 24 GiB.
 
 SfM JSON se čte průběžně pomocí ijson. COLMAP export ukládá pozorování na SSD,
 nikoli všechna do RAM. Jeden RAW dekodér a záznamy dokončených obrázků umožní

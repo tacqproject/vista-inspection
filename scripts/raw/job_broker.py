@@ -28,6 +28,7 @@ _slot = threading.Semaphore(1)
 
 # These are fixed application functions, not arbitrary Python/shell execution.
 PYTHON_STAGES = {
+    'export-sfm': {'sfm', 'output', 'result'},
     'export-colmap': {'sfm', 'work', 'result'},
     'clean-mesh': {'mesh', 'output', 'result', 'keep_largest'},
     'texture-ply': {'mesh', 'output', 'result'},
@@ -62,6 +63,23 @@ def python_command(stage, payload, root, readonly, uid, pinned):
     if repo not in readonly:
         raise ValueError('RAW repository is not an approved read-only root')
     name = 'vista-raw-job-' + uuid.uuid4().hex[:16]
+    if stage == 'export-sfm':
+        # Match the ABI of Meshroom's installed bindings without changing
+        # the API's Python or any shared/system installation.
+        meshroom = [p for p in readonly if (p / 'aliceVision/lib/python/pyalicevision').is_dir()]
+        python = root / 'tools/python-sfm/python/bin/python3.11'
+        if len(meshroom) != 1 or not python.is_file():
+            raise ValueError('Install the isolated SfM Python 3.11 runtime and read-only Meshroom bindings')
+        command = bounded_command(name, uid) + [
+            '-v', f'{root}:{root}:rw', '-v', f'{repo}:{repo}:ro',
+            '-v', f'{meshroom[0]}:/meshroom:ro',
+            '-e', 'ALICEVISION_ROOT=/meshroom/aliceVision',
+            '-e', 'LD_LIBRARY_PATH=/meshroom/aliceVision/lib',
+            '-e', 'PYTHONPATH=/meshroom/aliceVision/lib/python:/meshroom/lib',
+            '-e', 'PYTHONDONTWRITEBYTECODE=1', '-e', 'HOME=/tmp',
+            pinned['vista-meshroom:latest'], str(python), '-u',
+            str(repo / 'scripts/raw/stream_sfm.py'), json.dumps(payload)]
+        return command, name
     mounts = [root, *readonly, Path('/usr'), Path('/lib'), Path('/lib64'),
               Path('/etc/ssl/certs'), Path('/etc/fonts')]
     env = {'ISOLATED_DATA_ROOT': str(root), 'UPLOAD_DIR': str(root / 'uploads'),

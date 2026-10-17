@@ -146,6 +146,31 @@ class RawIsolationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate('lods', {**payload, 'code': 'arbitrary'})
 
+    def test_sfm_export_uses_private_abi_and_readonly_tool(self):
+        repo = Path(broker.__file__).resolve().parents[2]
+        meshroom = self.base / 'meshroom'
+        (meshroom / 'aliceVision/lib/python/pyalicevision').mkdir(parents=True)
+        python = self.root / 'tools/python-sfm/python/bin/python3.11'
+        python.parent.mkdir(parents=True)
+        python.touch()
+        payload = {k: str(self.root / n) for k, n in
+                   [('sfm', 'sfm.abc'), ('output', 'sfm.json'), ('result', 'result.json')]}
+        def validate(data, readonly):
+            return broker.validate(['python-stage', 'export-sfm', json.dumps(data)], self.root,
+                                   readonly, '1000:1000', {'vista-meshroom:latest': 'sha256:test'})
+        command, _ = validate(payload, [repo, meshroom])
+        self.assertIn(f'{meshroom}:/meshroom:ro', command)
+        self.assertIn(str(python), command)
+        self.assertIn('24g', command)
+        self.assertIn('--network', command)
+        with self.assertRaises(ValueError):
+            validate({**payload, 'output': str(self.source / 'outside.json')}, [repo, meshroom])
+        with self.assertRaises(ValueError):
+            validate(payload, [repo])
+        python.unlink()
+        with self.assertRaises(ValueError):
+            validate(payload, [repo, meshroom])
+
     def test_additional_readonly_dataset_preserves_source_boundaries(self):
         second = self.base / 'second-dataset'
         second.mkdir()

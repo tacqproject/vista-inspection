@@ -45,6 +45,14 @@ async def _export_sfm_json(cache_dir: Path, log: Path) -> Path:
     out = cache_dir / 'sfm.json'
     if cp.valid('sfm-json', inputs):
         return out
+    if os.environ.get('VISTA_JOB_SOCKET'):
+        # Native convertSfMFormat constructs a second, multi-GB JSON tree.
+        # The RAW worker keeps native SfM and serializes small batches instead.
+        await asyncio.to_thread(run_python_stage, 'export-sfm', {
+            'sfm': str(folder / 'sfm.abc'), 'output': str(out),
+            'result': str(cache_dir / 'sfm-export-result.json')}, log)
+        cp.save('sfm-json', inputs, [out])
+        return out
     temp = cache_dir / 'sfm-pending.json'
     temp.unlink(missing_ok=True)
     rel = (folder / 'sfm.abc').relative_to(cache_dir)
